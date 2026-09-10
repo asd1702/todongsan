@@ -42,7 +42,7 @@
 | --- | --- | --- |
 | API Gateway | 라우팅, JWT 검증, 인증 정보 전달 | **@kang-jaeh** |
 | Member-Point | 회원, OAuth/JWT, 포인트 지갑·적립·차감·정산 | **@kang-jaeh** |
-| Battle | 블라인드 투표, 댓글, 결과 통계 | 팀 |
+| Battle | 블라인드 투표, 댓글, 결과 통계 | **@K-Ghwan99**  |
 | **Market** | **포인트 예측 참여, 가격 계산, 결과 확정, 정산·환불 처리** | **@asd1702** |
 | Insight-Reputation | AI 요약, 사용자 신뢰도, 데이터 분석 | 팀 |
 

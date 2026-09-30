@@ -1,5 +1,6 @@
 package com.todongsan.marketservice.market.scheduler;
 
+import com.todongsan.marketservice.global.config.PointTransportProperties;
 import com.todongsan.marketservice.market.dto.response.RetryRefundBatchResponse;
 import com.todongsan.marketservice.market.service.MarketRefundService;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -21,6 +22,7 @@ import org.springframework.stereotype.Component;
 public class MarketRefundRetryScheduler {
 
     private final MarketRefundService marketRefundService;
+    private final PointTransportProperties pointTransportProperties;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     @Value("${market.scheduler.refund-retry.limit:50}")
@@ -28,6 +30,11 @@ public class MarketRefundRetryScheduler {
 
     @Scheduled(fixedDelayString = "${market.scheduler.refund-retry.fixed-delay-ms:180000}")
     public void run() {
+        if (pointTransportProperties.isAsync()) {
+            // async 모드에서는 PENDING detail이 Kafka로 처리 중이므로 Feign 재전송을 하지 않는다.
+            log.debug("Point transport is async. skip refund retry scheduler.");
+            return;
+        }
         if (!running.compareAndSet(false, true)) {
             log.info("Refund retry scheduler is already running. skip.");
             return;

@@ -10,6 +10,7 @@ import com.todongsan.marketservice.market.entity.Market;
 import com.todongsan.marketservice.market.entity.MarketPrediction;
 import com.todongsan.marketservice.market.entity.MarketRefundDetail;
 import com.todongsan.marketservice.market.entity.MarketVoid;
+import com.todongsan.marketservice.market.outbox.PointRequestOutboxWriter;
 import com.todongsan.marketservice.market.repository.MarketMapper;
 import com.todongsan.marketservice.market.type.MarketStatus;
 import com.todongsan.marketservice.market.type.RefundStatus;
@@ -32,9 +33,10 @@ public class MarketRefundTransactionService {
     private static final int RETRY_PENDING_THRESHOLD_MINUTES = 3;
 
     private final MarketMapper marketMapper;
+    private final PointRequestOutboxWriter pointRequestOutboxWriter;
 
     @Transactional
-    public MarketRefundPreparation prepareRefund(long marketId) {
+    public MarketRefundPreparation prepareRefund(long marketId, boolean publishPointRequests) {
         LocalDateTime now = LocalDateTime.now();
         Market market = marketMapper.lockMarketById(marketId);
         if (market == null) {
@@ -70,6 +72,9 @@ public class MarketRefundTransactionService {
         marketMapper.updateMarketVoidRefundStatus(marketVoid.getId(), RefundStatus.IN_PROGRESS, now);
 
         List<MarketRefundDetail> savedDetails = marketMapper.selectPendingRefundDetailsByVoidId(marketVoid.getId());
+        if (publishPointRequests) {
+            pointRequestOutboxWriter.appendRefundRequests(marketId, savedDetails, MarketRefundService.REASON, now);
+        }
         return new MarketRefundPreparation(marketId, marketVoid.getId(), savedDetails, false);
     }
 

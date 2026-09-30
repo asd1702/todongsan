@@ -1,5 +1,6 @@
 package com.todongsan.marketservice.market.service;
 
+import com.todongsan.marketservice.global.config.PointTransportProperties;
 import com.todongsan.marketservice.global.exception.CustomException;
 import com.todongsan.marketservice.market.client.MemberPointClient;
 import com.todongsan.marketservice.market.client.MemberPointRefundBatchRequest;
@@ -24,16 +25,22 @@ import org.springframework.stereotype.Service;
 public class MarketRefundService {
 
     private static final String REFERENCE_TYPE = "MARKET_PREDICTION";
-    private static final String REASON = "Market 무효 처리 환불";
+    static final String REASON = "Market 무효 처리 환불";
     private static final String RETRY_REASON = "Market 무효 처리 환불 재시도";
 
     private final MarketRefundTransactionService transactionService;
     private final MemberPointClient memberPointClient;
+    private final PointTransportProperties pointTransportProperties;
 
     public RefundMarketResponse refundMarket(long marketId) {
-        MarketRefundPreparation preparation = transactionService.prepareRefund(marketId);
+        boolean async = pointTransportProperties.isAsync();
+        MarketRefundPreparation preparation = transactionService.prepareRefund(marketId, async);
         if (preparation.completed()) {
             return preparation.toResponse(0, 0, 0, RefundStatus.COMPLETED);
+        }
+        if (async) {
+            // 요청은 outbox에 기록됨. 결과는 Member-Point 결과 이벤트로 반영된다.
+            return preparation.toResponse(0, 0, 0, RefundStatus.IN_PROGRESS);
         }
 
         String batchIdempotencyKey = batchIdempotencyKey(preparation);

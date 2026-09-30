@@ -1,6 +1,6 @@
 # Market ↔ Member-Point 비동기 포인트 흐름 설계
 
-> 상태: **설계 중** (1단계 — 결정 사항·이벤트 스키마·outbox 테이블 확정, 커넥터 설정 미정)
+> 상태: **구현 중** (2단계 환불 요청 방향 완료, 3단계 결과 방향 예정)
 > 범위: Market Service ↔ Member-Point Service. Battle / Insight 연계는 이 문서의 범위가 아니다.
 > 상위 원칙: 루트 `AGENTS.md` 섹션 5 "비동기 이벤트 원칙 (DB = SSOT, CDC)"
 
@@ -305,10 +305,10 @@ CREATE TABLE market_outbox_event (          -- member-point: point_outbox_event
 
 ## 10. 미정 사항 (다음 단계)
 
-- [ ] Debezium 커넥터 설정 파일 (§9 매핑 기준)
-- [ ] member-point-mysql binlog/GTID 설정 및 Debezium 계정 (market-mysql과 동일 방식)
-- [ ] 전송 방식·키 전략 설정 프로퍼티 이름
-- [ ] DLQ 토픽 이름과 재시도 횟수·backoff
+- [x] Debezium 커넥터 설정 파일 → `infra/debezium/connectors/market-outbox.json` (MP 결과 커넥터는 3단계)
+- [x] member-point-mysql binlog/GTID 설정 및 Debezium 계정 → `infra/docker-compose.yml`, `infra/debezium/memberpoint-debezium-user.sql`
+- [x] 전송 방식·키 전략 설정 → Market `market.point-transport.mode` (`MARKET_POINT_TRANSPORT_MODE`, 기본 sync), `market.point-transport.request-key` (`MARKET_POINT_REQUEST_KEY`, 기본 member_id) / MP consumer `member-point.kafka.market-point-requests.enabled` (`MARKET_POINT_REQUESTS_CONSUMER_ENABLED`, 기본 false)
+- [x] DLQ → `{topic}-dlt` (`market.point-requests-dlt`). 재시도 4회 지수 backoff (1s→2s→4s→8s). 처리 불가(깨진 JSON, 모르는 eventType/schemaVersion)는 재시도 없이 DLT
 - [ ] 정체 감지 기준 시간과 방식
 - [ ] outbox row 보존 기간과 삭제 주기
 - [ ] CI 스키마 호환성 검사 (Schema Registry, E3)
@@ -319,8 +319,8 @@ CREATE TABLE market_outbox_event (          -- member-point: point_outbox_event
 
 | 단계 | 작업 | 검증 |
 |---|---|---|
-| 1 | 설계 확정 (이 문서 + 이벤트 스키마 + ERD) — **스키마·ERD 완료, 커넥터 설정 남음** | 문서 리뷰 |
-| 2 | **환불 요청 방향**: Market outbox (Flyway), 환불 준비 TX에서 outbox 기록, 커넥터 등록, MP consumer | 무효 처리 → MP `point_history` 생성, 같은 메시지 재전달 시 `ALREADY_PROCESSED` |
+| 1 | 설계 확정 (이 문서 + 이벤트 스키마 + ERD) — **완료** | 문서 리뷰 |
+| 2 | **환불 요청 방향** — **완료**: Market outbox (Flyway V2), 환불 준비 TX에서 outbox 기록, 커넥터 등록, MP consumer. async 모드에서 환불 재시도 스케줄러는 skip | 무효 처리 → MP `point_history` 생성, 같은 메시지 재전달 시 `ALREADY_PROCESSED` |
 | 3 | **환불 결과 방향**: MP outbox, 결과 이벤트, Market consumer 완료 판정 | 무효 → `VOIDED` 자동 완료, MP 중단·재기동 후에도 유실 없음 |
 | 4 | **정산 적용**: 2~3 구조를 정산에 적용 | 정산 → `SETTLED`, 기존 정산 테스트 통과 |
 | 5 | 정리: 정체 감지, DLQ, 실험 수행 및 결과 기록 | 전체 테스트, 실험 결과 문서화 |

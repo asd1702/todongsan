@@ -1575,4 +1575,25 @@
         WHERE deleted_at IS NULL
     </select>
 
+    <insert id="insertMarketOutboxEvents">
+        INSERT INTO market_outbox_event (
+            event_id,
+            aggregate_type,
+            aggregate_id,
+            event_type,
+            payload,
+            created_at
+        ) VALUES
+        <foreach collection="events" item="event" separator=",">
+            (
+                #{event.eventId},
+                #{event.aggregateType},
+                #{event.aggregateId},
+                #{event.eventType},
+                #{event.payload},
+                #{event.createdAt}
+            )
+        </foreach>
+    </insert>
+
 </mapper>

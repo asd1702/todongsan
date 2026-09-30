@@ -36,6 +36,11 @@ mybatis:
     map-underscore-to-camel-case: true
 
 market:
+  point-transport:
+    # sync: Feign 배치 호출 / async: outbox + Debezium CDC (현재 환불만 적용, docs/architecture/ASYNC_POINT_FLOW.md)
+    mode: ${MARKET_POINT_TRANSPORT_MODE:sync}
+    # async 요청 토픽(market.point-requests)의 Kafka key: member_id | market_id
+    request-key: ${MARKET_POINT_REQUEST_KEY:member_id}
   scheduler:
     prediction-reconciliation:
       enabled: true

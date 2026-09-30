@@ -281,6 +281,13 @@ public class PointInternalServiceImpl implements PointInternalService {
                 .build();
     }
 
+    @Override
+    @Transactional
+    public BatchItemResult creditMarketPoint(PointHistoryType type, Long predictionId, Long memberId, BigDecimal amount,
+                                             String referenceType, Long referenceId, String reason, String idempotencyKey) {
+        return processEarnItem(predictionId, memberId, amount, referenceType, referenceId, reason, idempotencyKey, type);
+    }
+
     private BatchItemResult processEarnItem(Long predictionId, Long memberId, BigDecimal amount,
                                             String referenceType, Long referenceId,
                                             String reason, String idempotencyKey,

@@ -10,6 +10,7 @@ import com.todongsan.marketservice.market.client.MemberPointRefundItemResult;
 import com.todongsan.marketservice.market.client.MemberPointRefundItemStatus;
 import com.todongsan.marketservice.market.dto.response.RefundMarketResponse;
 import com.todongsan.marketservice.market.entity.MarketRefundDetail;
+import com.todongsan.marketservice.market.outbox.PointRequestOutboxWriter;
 import com.todongsan.marketservice.market.repository.MarketMapper;
 import com.todongsan.marketservice.market.type.RefundStatus;
 import com.todongsan.marketservice.market.type.TransactionItemStatus;
@@ -27,9 +28,12 @@ class MarketRefundTransactionServiceTest {
     @Mock
     private MarketMapper marketMapper;
 
+    @Mock
+    private PointRequestOutboxWriter pointRequestOutboxWriter;
+
     @Test
     void applyRefundRetryResultSkipsItemWhenDetailUpdateCountIsZero() {
-        MarketRefundTransactionService service = new MarketRefundTransactionService(marketMapper);
+        MarketRefundTransactionService service = new MarketRefundTransactionService(marketMapper, pointRequestOutboxWriter);
         MarketRefundDetail detail = refundDetail();
         MarketRefundRetryPreparation preparation = new MarketRefundRetryPreparation(
                 100L,

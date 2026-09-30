@@ -18,6 +18,18 @@ spring:
   flyway:
     enabled: true
     baseline-on-migrate: ${FLYWAY_BASELINE_ON_MIGRATE:false}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: member-point-service
+      auto-offset-reset: earliest
+
+member-point:
+  kafka:
+    market-point-requests:
+      # Market outbox + CDC 비동기 포인트 요청 consumer (docs/architecture/ASYNC_POINT_FLOW.md)
+      enabled: ${MARKET_POINT_REQUESTS_CONSUMER_ENABLED:false}
+      topic: market.point-requests
 
 server:
   port: 8080

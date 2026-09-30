@@ -1,4 +1,5 @@
 -- H2-only schema for Market unit and slice tests. MySQL integration tests use Flyway migrations.
+DROP TABLE IF EXISTS market_outbox_event;
 DROP TABLE IF EXISTS market_price_history;
 DROP TABLE IF EXISTS market_comment;
 DROP TABLE IF EXISTS market_reputation_update;
@@ -259,4 +260,16 @@ CREATE TABLE market_refund_detail (
     CONSTRAINT fk_refund_detail_prediction
         FOREIGN KEY (prediction_id)
         REFERENCES market_prediction(id)
+);
+
+CREATE TABLE market_outbox_event (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    event_id CHAR(36) NOT NULL,
+    aggregate_type VARCHAR(50) NOT NULL,
+    aggregate_id VARCHAR(50) NOT NULL,
+    event_type VARCHAR(80) NOT NULL,
+    payload CLOB NOT NULL,
+    created_at DATETIME(3) NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_market_outbox_event_event_id (event_id)
 );

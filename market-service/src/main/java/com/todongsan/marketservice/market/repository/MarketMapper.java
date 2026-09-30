@@ -2,6 +2,7 @@ package com.todongsan.marketservice.market.repository;
 
 import com.todongsan.marketservice.market.entity.Market;
 import com.todongsan.marketservice.market.entity.MarketOption;
+import com.todongsan.marketservice.market.entity.MarketOutboxEvent;
 import com.todongsan.marketservice.market.entity.MarketPrediction;
 import com.todongsan.marketservice.market.entity.MarketPriceHistory;
 import com.todongsan.marketservice.market.entity.MarketRefundDetail;
@@ -426,4 +427,6 @@ public interface MarketMapper {
     long countDistinctProblemMarketsForAdmin(@Param("pendingThreshold") LocalDateTime pendingThreshold);
 
     AdminMarketStatusCountsRow selectAdminMarketStatusCounts(@Param("now") LocalDateTime now);
+
+    int insertMarketOutboxEvents(@Param("events") List<MarketOutboxEvent> events);
 }

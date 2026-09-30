@@ -485,3 +485,26 @@ Git Bash에서 `docker exec kafka /opt/kafka/bin/...`를 실행할 때는 경로
 - MySQL 컨테이너의 `TZ=Asia/Seoul` 때문에 서버 time zone이 `KST`로 잡혀 JDBC 연결이 실패한다. 커넥터 설정에 `"database.connectionTimeZone": "Asia/Seoul"`을 반드시 넣는다.
 - `DATETIME` 컬럼은 time zone 정보 없이 epoch millis(UTC 기준 해석)로 발행된다. Consumer는 이 값을 KST 로컬 시각으로 해석해야 한다.
 - 종료: `docker compose -f docker-compose.kafka.yml down` (`-v` 사용 금지)
+
+### 비동기 포인트 흐름 실행 (Market 환불 → Member-Point)
+
+설계: `docs/architecture/ASYNC_POINT_FLOW.md`
+
+```bash
+# 1) member-point-mysql도 binlog/GTID 설정 포함. Debezium 계정 (최초 1회, 재실행 안전)
+docker exec -i member-point-mysql mysql -uroot -p<MEMBERPOINT_MYSQL_ROOT_PASSWORD> < infra/debezium/memberpoint-debezium-user.sql
+
+# 2) Market outbox 커넥터 등록/갱신 (PUT, 재실행 안전)
+./infra/debezium/register-connector.sh market-outbox
+
+# 3) 서비스 실행 시 환경 변수
+#    market-service:       MARKET_POINT_TRANSPORT_MODE=async   (기본 sync)
+#                          MARKET_POINT_REQUEST_KEY=member_id  (실험 시 market_id)
+#    member-point-service: MARKET_POINT_REQUESTS_CONSUMER_ENABLED=true (기본 false)
+#                          KAFKA_BOOTSTRAP_SERVERS=localhost:9092 (컨테이너 내부에서는 kafka:29092)
+```
+
+| 토픽 | 발행 | 소비 | key |
+|---|---|---|---|
+| `market.point-requests` | Debezium (`market_outbox_event`) | member-point-service | `member_id` |
+| `market.point-requests-dlt` | member-point-service (처리 실패) | 수동 확인 | 원본 key |

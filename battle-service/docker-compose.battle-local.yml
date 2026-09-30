@@ -13,11 +13,11 @@ services:
       TZ: Asia/Seoul
       SERVER_PORT: 8081
       SPRING_PROFILES_ACTIVE: default
-      DB_HOST: todongsan-mysql
+      DB_HOST: battle-mysql
       DB_PORT: 3306
       DB_NAME: battle
-      DB_USERNAME: root
-      DB_PASSWORD: 1234
+      DB_USERNAME: battle_user
+      DB_PASSWORD: battle-local-password
       MEMBER_POINT_SERVICE_URL: http://member-point-service:8080
       INSIGHT_SERVICE_URL: http://insight-reputation-service:8083
       INTERNAL_AUTH_TOKEN: local-internal-token

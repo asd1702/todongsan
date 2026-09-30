@@ -17,9 +17,9 @@
 - `api-gateway`: 9000 포트에서 `/api/v1/markets/**`를 Market(8082), `/api/v1/members/**`와 `/api/v1/points/**`를 Member-Point(8080)로 라우팅한다. 인증 후 `X-Member-Id`를 하위 서비스에 전달한다.
 - `market-service`: Market DB의 `market`, `market_option`, `market_prediction`, `market_price_history`를 소유하고 Member-Point 내부 API를 동기 호출한다.
 - `member-point-service`: Member-Point DB의 `member.point_balance`, `point_history`를 소유한다.
-- MySQL: `market`과 `memberpoint`는 같은 MySQL 인스턴스의 별도 스키마다. 서비스 간 DB 트랜잭션은 없다.
+- MySQL: `market`과 `memberpoint`는 서로 다른 MySQL 인스턴스에 있다. 서비스 간 DB 트랜잭션은 없다.
 
-근거: `api-gateway/src/main/resources/application.yml`, `market-service/src/main/resources/application.yml`, `infra/mysql/init/01-market-schema.sql`, `infra/mysql/init/02-memberpoint-schema.sql`.
+근거: `api-gateway/src/main/resources/application.yml`, `market-service/src/main/resources/application.yml`, 각 서비스의 `src/main/resources/db/migration/V1__baseline.sql`.
 
 ## 4. Market 예측 참여 처리 흐름
 
@@ -44,7 +44,7 @@
 
 따라서 Member-Point 트랜잭션이 커밋됐다면 balance와 성공 history는 함께 남는다. 다만 Market 트랜잭션과는 분리되어 있으므로 양 서비스 간 원자성은 대사로 보완한다.
 
-근거: `PointInternalServiceImpl.spend()/getTransaction()`, `PointHistory`, `MemberRepository.spendPoint()`, `02-memberpoint-schema.sql`.
+근거: `PointInternalServiceImpl.spend()/getTransaction()`, `PointHistory`, `MemberRepository.spendPoint()`, `member-point-service/src/main/resources/db/migration/V1__baseline.sql`.
 
 ## 6. 상태 전이 분석
 
@@ -72,9 +72,9 @@
 
 ## 8. dev seed와 과거 부분 삭제 사고 분석
 
-최초 분석 당시 `docs/market/sql/dev_seed_market_frontend_scenarios.sql` 안의 삭제 로직이 원인이었다. 현재 seed는 `INSERT IGNORE` 기반 추가 전용이며 기존 Market/Prediction을 삭제하거나 갱신하지 않는다.
+최초 분석 당시 legacy Market seed 안의 삭제 로직이 원인이었다. 현재 seed는 `scripts/seed/frontend/market.sql`에 있으며 `INSERT IGNORE` 기반 추가 전용이다.
 
-과거 삭제 SQL은 `dev_cleanup_market_frontend_scenarios.sql.disabled`에 사고 분석 참고용으로만 보존한다. **DO NOT RUN** 자료이며 일반 초기화나 테스트 절차가 아니다. 아래는 과거 위험 범위 설명이다.
+과거 삭제 SQL은 source tree에서 제거했다. 아래는 과거 위험 범위 설명이며 일반 초기화나 테스트 절차가 아니다.
 
 | 테이블 | 삭제 조건 요약 |
 |---|---|

@@ -42,16 +42,16 @@ insight-reputation-service ──→ battle-service:8081              GET  /inte
 insight-reputation-service ──→ market-service:8082              GET  /internal/api/v1/markets/{id}/insight-summary
 insight-reputation-service ──→ market-service:8082              GET  /internal/api/v1/markets/{id}/insight-predictions
 
-[DB — RDS 아님. 단일 EC2의 Docker MySQL 컨테이너(todongsan-mysql)에 서비스별 스키마로 분리]
+[DB — 서비스별 독립 Docker MySQL]
 
-member-point-service      ──→ todongsan-mysql (memberpoint DB)
-battle-service            ──→ todongsan-mysql (battle DB)
-market-service            ──→ todongsan-mysql (market DB)
-insight-reputation-service ──→ todongsan-mysql (insight DB)
+member-point-service       ──→ member-point-mysql (memberpoint DB)
+battle-service             ──→ battle-mysql (battle DB)
+market-service             ──→ market-mysql (market DB)
+insight-reputation-service ──→ insight-mysql (insight DB)
 ```
 
 > **[2026-06-23 갱신]** 이 문서는 통합 작업 전(각자 개발 중) 기준으로 작성된 초안이 많이 남아있다.
-> 실제 운영 인프라는 AWS RDS가 아니라 **EC2 1대 + Docker Compose**(`infra/docker-compose.yml`이 MySQL 컨테이너와 네트워크를 생성, 루트 `docker-compose.yml`이 앱 5개를 띄움) 구성이다. 8절의 RDS 기반 docker-compose 예시는 작성 당시의 계획안이며 현재 실제 배포 방식과 다르니, 정확한 배포 설정은 루트 `docker-compose.yml`과 `infra/INFRA_GUIDE.md`를 참고할 것.
+> 실제 운영 인프라는 AWS RDS가 아니라 **서비스별 Docker MySQL + Docker Compose** 구성이다. `infra/docker-compose.yml`이 네 MySQL과 네트워크를 생성하고, 루트 `docker-compose.yml`이 앱 5개를 띄운다.
 
 ---
 
@@ -324,7 +324,7 @@ management:
 
 ## 8. docker-compose.yml 예시 (RDS 연결 포함) — ⚠️ 작성 당시 계획안, 실제와 다름
 
-> 아래는 통합 전 작성된 RDS 기반 계획 예시다. **실제로는 RDS를 쓰지 않고 EC2 1대 + Docker MySQL 컨테이너(`todongsan-mysql`)** 구성이며, 정확한 환경변수(`DB_URL` 형식, `MEMBER_POINT_CLIENT_MODE` 등)는 루트 `docker-compose.yml`을 참고할 것. 이 섹션은 라우팅/서비스 구성의 큰 그림 참고용으로만 남겨둔다.
+> 아래는 통합 전 작성된 RDS 기반 계획 예시다. 실제 구성은 서비스별 Docker MySQL이며, 정확한 환경변수는 루트 `docker-compose.yml`을 참고할 것. 이 섹션은 라우팅/서비스 구성의 큰 그림 참고용으로만 남겨둔다.
 
 ```yaml
 version: '3.8'

@@ -13,11 +13,11 @@ services:
       SERVER_PORT: 8082
       SPRING_PROFILES_ACTIVE: prod
       TZ: Asia/Seoul
-      DB_HOST: todongsan-mysql
+      DB_HOST: market-mysql
       DB_PORT: 3306
       DB_MARKET: market
-      DB_USERNAME: root
-      DB_PASSWORD: 1234
+      DB_USERNAME: market_user
+      DB_PASSWORD: market-local-password
       MEMBER_POINT_CLIENT_MODE: http
       MEMBER_POINT_SERVICE_URL: http://member-point-service:8080
       INSIGHT_CLIENT_MODE: http

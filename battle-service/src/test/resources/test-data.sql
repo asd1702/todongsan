@@ -3,7 +3,7 @@
 -- Swagger (http://localhost:8082/swagger-ui/index.html) 테스트용
 --
 -- 실행 방법:
---   docker exec -i todongsan-mysql mysql -uroot -p1234 battle < test-data.sql
+--   docker exec -i battle-mysql mysql -ubattle_user -pbattle-local-password battle < test-data.sql
 --
 -- 테스트 시나리오:
 --   battle_id=1 : ACTIVE  → 투표 가능 (POST /api/v1/battles/1/votes)
@@ -12,8 +12,6 @@
 --   battle_id=4 : CANCELLED → 일반 사용자 BATTLE_NOT_FOUND
 --   member_id   : 1(생성자), 2(투표자), 3(댓글작성자) — X-Member-Id 헤더에 사용
 -- ============================================================
-USE battle;
-
 -- ============================================================
 -- 기존 테스트 데이터 초기화 (재실행 안전)
 -- ============================================================

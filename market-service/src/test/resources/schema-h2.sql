@@ -1,3 +1,4 @@
+-- H2-only schema for Market unit and slice tests. MySQL integration tests use Flyway migrations.
 DROP TABLE IF EXISTS market_price_history;
 DROP TABLE IF EXISTS market_comment;
 DROP TABLE IF EXISTS market_reputation_update;

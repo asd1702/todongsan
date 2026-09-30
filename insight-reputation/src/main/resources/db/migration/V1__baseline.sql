@@ -1,5 +1,3 @@
-USE insight;
-
 -- ==========================================
 -- reputation
 -- ==========================================
@@ -86,6 +84,7 @@ CREATE TABLE public_data_snapshot (
     raw_data            JSON            NOT NULL,
     collected_at        DATETIME        NOT NULL,
     created_at          DATETIME        NOT NULL,
+    updated_at          DATETIME(6),
     PRIMARY KEY (id),
     UNIQUE KEY uq_snapshot (source, data_type, reference_date, source_region_id, itm_id),
     INDEX idx_source_type_date (source, data_type, reference_date),

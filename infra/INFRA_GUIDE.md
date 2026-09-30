@@ -4,7 +4,7 @@
 
 본 문서는 Todongsan 프로젝트의 로컬 개발 환경 구성을 설명한다.
 
-모든 개발자는 동일한 Docker Compose 설정을 사용하여 로컬 MySQL 환경을 구축한다.
+모든 개발자는 동일한 Docker Compose 설정을 사용하여 서비스별 독립 MySQL 환경을 구축한다.
 
 ---
 
@@ -33,13 +33,6 @@ todongsan
 │
 ├── infra
 │   ├── docker-compose.yml
-│   └── mysql
-│       └── init
-│           ├── 00-create-databases.sql
-│           ├── 01-market-schema.sql
-│           ├── 02-memberpoint-schema.sql
-│           ├── 03-battle-schema.sql
-│           └── 04-insight-schema.sql
 │
 ├── market-service
 ├── member-point-service
@@ -72,7 +65,10 @@ docker ps
 정상 실행 시 다음 컨테이너가 표시된다.
 
 ```text
-todongsan-mysql
+member-point-mysql
+market-mysql
+battle-mysql
+insight-mysql
 ```
 
 ---
@@ -92,8 +88,7 @@ docker compose down
 EC2와 통합 로컬 검증 환경에서 MySQL 데이터는 Docker volume에 저장된다.
 
 ```text
-compose volume key: todongsan_mysql_data
-docker compose config output: infra_todongsan_mysql_data
+compose volume name: memberpoint-mysql-data, market-mysql-data, battle-mysql-data, insight-mysql-data
 ```
 
 일반 종료 또는 재기동 시에는 volume을 보존해야 한다.
@@ -123,32 +118,32 @@ docker volume prune
 컨테이너 접속
 
 ```bash
-docker exec -it todongsan-mysql bash
+docker exec -it market-mysql bash
 ```
 
 MySQL 접속
 
 ```bash
-mysql -u root -p
+mysql -u market_user -p market
 ```
 
 비밀번호
 
 ```text
-1234
+market-local-password
 ```
 
 ---
 
 ## 8. 생성되는 Database
 
-초기 실행 시 다음 Database가 자동 생성된다.
+각 컨테이너는 자신의 Database 하나만 자동 생성한다.
 
 ```text
-memberpoint
-battle
-market
-insight
+member-point-mysql → memberpoint
+market-mysql       → market
+battle-mysql       → battle
+insight-mysql      → insight
 ```
 
 확인
@@ -159,36 +154,9 @@ SHOW DATABASES;
 
 ---
 
-## 9. SQL 초기화 스크립트
+## 9. Schema 초기화
 
-초기 SQL 파일 위치
-
-```text
-infra/mysql/init
-```
-
-예시
-
-```text
-00-create-databases.sql
-01-market-schema.sql
-02-memberpoint-schema.sql
-03-battle-schema.sql
-04-insight-schema.sql
-```
-
-### 주의
-
-docker-entrypoint-initdb.d 스크립트는 MySQL 컨테이너 최초 생성 시에만 실행된다.
-
-SQL 수정 후 재반영하려면
-
-```bash
-docker compose down -v
-docker compose up -d
-```
-
-를 수행해야 한다.
+Docker는 database와 계정만 생성한다. 테이블 생성·변경은 각 Spring Boot 서비스의 Flyway migration이 담당한다. 빈 DB에서 서비스가 처음 기동될 때 `V1__baseline.sql`이 적용되며, 기존 schema에는 Flyway가 baseline history를 기록한 뒤 후속 migration만 적용한다.
 
 ---
 
@@ -200,9 +168,9 @@ docker compose up -d
 spring:
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3307/market?serverTimezone=Asia/Seoul&characterEncoding=UTF-8
-    username: root
-    password: 1234
+    url: jdbc:mysql://localhost:3308/market?serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+    username: market_user
+    password: market-local-password
 ```
 
 ### 실행
@@ -240,8 +208,14 @@ EC2 1대 + Docker Compose + Docker MySQL
 ```text
 DB_HOST
 DB_PORT
-DB_USERNAME
-DB_PASSWORD
+MEMBERPOINT_DB_USERNAME
+MEMBERPOINT_DB_PASSWORD
+MARKET_DB_USERNAME
+MARKET_DB_PASSWORD
+BATTLE_DB_USERNAME
+BATTLE_DB_PASSWORD
+INSIGHT_DB_USERNAME
+INSIGHT_DB_PASSWORD
 ```
 
 권장 관리 방법
@@ -259,13 +233,13 @@ DB_PASSWORD
 Windows
 
 ```bash
-netstat -ano | findstr 3307
+netstat -ano | findstr 3308
 ```
 
 Mac / Linux
 
 ```bash
-lsof -i :3307
+lsof -i :3308
 ```
 
 ### 컨테이너 상태 확인
@@ -277,13 +251,13 @@ docker ps
 ### 컨테이너 로그 확인
 
 ```bash
-docker logs todongsan-mysql
+docker logs market-mysql
 ```
 
 ### MySQL 접속 확인
 
 ```bash
-docker exec -it todongsan-mysql mysql -u root -p
+docker exec -it market-mysql mysql -u market_user -p market
 ```
 
 ---
@@ -307,7 +281,7 @@ Local integrated Docker execution uses the infra compose plus the root app compo
 infra/docker-compose.yml
   - MySQL only
   - creates todongsan-network
-  - runs todongsan-mysql
+  - runs member-point-mysql, market-mysql, battle-mysql, insight-mysql
 
 docker-compose.yml
   - app services only
@@ -377,8 +351,8 @@ Network rules:
 ```text
 Inside Docker Compose, localhost means the current container itself.
 Container-to-container calls must use Docker Compose service names.
-DB host inside app containers is todongsan-mysql.
-Use localhost:3307 only from the host PC when connecting to MySQL.
+Each app connects only to its matching DB service at port 3306.
+Use localhost:3307/3308/3309/3310 only from the host PC.
 ```
 
 Service URL examples for integrated compose:
@@ -436,10 +410,7 @@ service .env.rds
 JPA local policy:
 
 ```text
-battle-service and insight-reputation-service are JPA-based services.
-In local Docker MySQL integration tests, ddl-auto=update may create or adjust their schema.
-This is allowed only for local integration testing.
-EC2 Docker MySQL deployment ddl-auto policy must be reviewed before deployment.
+JPA 서비스는 `ddl-auto=validate`로 Flyway가 만든 schema를 검증한다. H2 기반 테스트 profile만 자체 테스트 schema 전략을 유지하며 Flyway를 비활성화한다.
 ```
 
 Forbidden commands for normal local verification and EC2 Docker MySQL deployment:
@@ -467,7 +438,7 @@ docs/infra/EC2_DOCKER_DEPLOY.md
 핵심 원칙:
 
 ```text
-1. infra/docker-compose.yml로 todongsan-mysql을 먼저 실행한다.
+1. infra/docker-compose.yml로 네 개의 서비스 전용 MySQL을 먼저 실행한다.
 2. root docker-compose.yml로 app service 5개를 실행한다.
 3. root .env는 .env.ec2.example을 복사해 EC2에서 수동 작성한다.
 4. 외부 진입점은 api-gateway:9000으로 제한한다.

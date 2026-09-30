@@ -14,9 +14,9 @@ services:
     environment:
       TZ: Asia/Seoul
       SPRING_PROFILES_ACTIVE: docker
-      DB_URL: jdbc:mysql://todongsan-mysql:3306/insight?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
-      DB_USERNAME: root
-      DB_PASSWORD: 1234
+      DB_URL: jdbc:mysql://insight-mysql:3306/insight?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
+      DB_USERNAME: insight_user
+      DB_PASSWORD: insight-local-password
       # REB_API_KEY, REB_API_BASE_URL — .env.local 에서 주입
       # CLAUDE_API_KEY, CLAUDE_API_URL, CLAUDE_MODEL — .env.local 에서 주입
       BATTLE_SERVICE_BASE_URL: http://battle-service:8081

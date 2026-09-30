@@ -1,5 +1,3 @@
-USE market;
-
 CREATE TABLE market (
     id                          BIGINT          NOT NULL AUTO_INCREMENT,
     title                       VARCHAR(255)    NOT NULL,

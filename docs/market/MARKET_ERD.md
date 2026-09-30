@@ -581,7 +581,7 @@ contract_quantity_after
 구현 시 migration 후보:
 
 ```text
-docs/market/sql/006_add_market_price_history_v4_columns.sql
+market-service/src/main/resources/db/migration/V1__baseline.sql
 ```
 
 이번 3차 문서 정리에서는 migration 파일을 실제로 추가하지 않는다.

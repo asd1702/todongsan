@@ -7,8 +7,10 @@ import lombok.AccessLevel;
 import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
+import org.hibernate.annotations.JdbcTypeCode;
 
 import java.math.BigDecimal;
+import java.sql.Types;
 import java.time.LocalDateTime;
 
 @Entity
@@ -47,8 +49,8 @@ public class VisitCertification extends BaseEntity {
     @Column(name = "longitude", precision = 11, scale = 8)
     private BigDecimal longitude;
 
-    @Lob
-    @Column(name = "comment_content")
+    @JdbcTypeCode(Types.LONGVARCHAR)
+    @Column(name = "comment_content", columnDefinition = "TEXT")
     private String commentContent;
 
     @Column(name = "battle_id")

@@ -1,29 +1,117 @@
 services:
-  mysql:
+  member-point-mysql:
     image: mysql:8.4
-    container_name: todongsan-mysql
+    container_name: member-point-mysql
     restart: unless-stopped
-
     ports:
       - "127.0.0.1:3307:3306"
-
     environment:
-      MYSQL_ROOT_PASSWORD: 1234
+      MYSQL_DATABASE: memberpoint
+      MYSQL_USER: ${MEMBERPOINT_DB_USERNAME:-memberpoint_user}
+      MYSQL_PASSWORD: ${MEMBERPOINT_DB_PASSWORD:-memberpoint-local-password}
+      MYSQL_ROOT_PASSWORD: ${MEMBERPOINT_MYSQL_ROOT_PASSWORD:-memberpoint-root-local-password}
       TZ: Asia/Seoul
-
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
-
     volumes:
-      - todongsan_mysql_data:/var/lib/mysql
-      - ./mysql/init:/docker-entrypoint-initdb.d
+      - memberpoint_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - todongsan-network
 
+  market-mysql:
+    image: mysql:8.4
+    container_name: market-mysql
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3308:3306"
+    environment:
+      MYSQL_DATABASE: market
+      MYSQL_USER: ${MARKET_DB_USERNAME:-market_user}
+      MYSQL_PASSWORD: ${MARKET_DB_PASSWORD:-market-local-password}
+      MYSQL_ROOT_PASSWORD: ${MARKET_MYSQL_ROOT_PASSWORD:-market-root-local-password}
+      TZ: Asia/Seoul
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - market_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - todongsan-network
+
+  battle-mysql:
+    image: mysql:8.4
+    container_name: battle-mysql
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3309:3306"
+    environment:
+      MYSQL_DATABASE: battle
+      MYSQL_USER: ${BATTLE_DB_USERNAME:-battle_user}
+      MYSQL_PASSWORD: ${BATTLE_DB_PASSWORD:-battle-local-password}
+      MYSQL_ROOT_PASSWORD: ${BATTLE_MYSQL_ROOT_PASSWORD:-battle-root-local-password}
+      TZ: Asia/Seoul
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - battle_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - todongsan-network
+
+  insight-mysql:
+    image: mysql:8.4
+    container_name: insight-mysql
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3310:3306"
+    environment:
+      MYSQL_DATABASE: insight
+      MYSQL_USER: ${INSIGHT_DB_USERNAME:-insight_user}
+      MYSQL_PASSWORD: ${INSIGHT_DB_PASSWORD:-insight-local-password}
+      MYSQL_ROOT_PASSWORD: ${INSIGHT_MYSQL_ROOT_PASSWORD:-insight-root-local-password}
+      TZ: Asia/Seoul
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - insight_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     networks:
       - todongsan-network
 
 volumes:
-  todongsan_mysql_data:
+  memberpoint_mysql_data:
+    name: memberpoint-mysql-data
+  market_mysql_data:
+    name: market-mysql-data
+  battle_mysql_data:
+    name: battle-mysql-data
+  insight_mysql_data:
+    name: insight-mysql-data
 
 networks:
   todongsan-network:

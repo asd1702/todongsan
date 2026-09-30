@@ -1,5 +1,3 @@
-USE memberpoint;
-
 CREATE TABLE member (
     id                   BIGINT          NOT NULL AUTO_INCREMENT,
     email                VARCHAR(255)    NULL,

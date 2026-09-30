@@ -388,9 +388,9 @@ public boolean isDeleted() {
 
 ### 8-1. 기본 원칙
 
-- 서비스 간 통신은 REST API 직접 호출로 처리한다.
-- 이벤트 브로커(Kafka, RabbitMQ)는 MVP에서 사용하지 않는다.
-- 모든 서비스 간 요청/응답은 공통 응답 포맷(`ApiResponse<T>`)을 따른다.
+- 호출자가 결과를 즉시 알아야 하는 서비스 간 통신은 REST API 직접 호출로 처리한다.
+- 호출자가 결과를 기다리지 않는 후속 처리는 Kafka 이벤트로 처리한다. SSOT는 각 서비스 DB이며, 이벤트는 outbox 테이블 + CDC(Debezium)로 발행한다. (세부 원칙: 루트 `AGENTS.md` 섹션 5)
+- 모든 서비스 간 REST 요청/응답은 공통 응답 포맷(`ApiResponse<T>`)을 따른다.
 
 ### 8-2. 멱등성 키
 

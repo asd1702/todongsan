@@ -11,11 +11,7 @@
 -- - devMemberId = 1
 -- - Direct participation test markets intentionally do not include member_id = 1 predictions.
 --
--- Run examples:
---   docker exec -i todongsan-mysql mysql -uroot -p1234 market < docs/market/sql/dev_seed_market_frontend_scenarios.sql
---
--- Windows PowerShell:
---   Get-Content .\docs\market\sql\dev_seed_market_frontend_scenarios.sql | docker exec -i todongsan-mysql mysql -uroot -p1234 market
+-- Run with scripts/seed/Invoke-TodongsanSeed.ps1 -Scenario frontend.
 --
 -- ADD-ONLY POLICY:
 -- - This seed never deletes or updates existing Market data.
@@ -23,8 +19,6 @@
 -- - This file is for adding test Markets, not cleanup or database initialization.
 -- - Do not partially delete Market data. Use the documented full MySQL volume
 --   reset procedure when a clean local database is required.
-
-USE market;
 
 START TRANSACTION;
 

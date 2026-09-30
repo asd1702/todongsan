@@ -1,5 +1,5 @@
 -- DEV ONLY — Closed Battle seed for AI report prompt testing
--- Prerequisites: dev_seed_all_frontend_scenarios.sql + dev_seed_supplement.sql
+-- Prerequisites: run the frontend and supplement scenarios first.
 --
 -- 목적: 개선된 ClaudeApiClient 프롬프트 검증을 위한 종료 배틀 + 다양한 투표 데이터
 -- 배틀 800013: 잠실 vs 강남 (서울 송파구), CLOSED, A(잠실) 승리 7:3
@@ -7,7 +7,7 @@
 -- 무결성 사전 검사:
 --   [OK] battle id=800013 → 기존 시드에 없음 (800001~800012 만 존재)
 --   [OK] insight_report (BATTLE, 800013) → 없음 (UniqueConstraint 충돌 없음)
---   [OK] member_id 1~10 → dev_seed_all_frontend_scenarios.sql 에서 INSERT 완료
+--   [OK] member_id 1~10 → frontend member-point seed에서 INSERT 완료
 --   [OK] option_a_count(7) + option_b_count(3) = vote_count(10) 일치
 --   [OK] battle_vote (800013, member_id) 중복 없음 — 각 멤버 1행
 --
@@ -28,14 +28,11 @@
 --   성별 A 선호율:   남성 3/4=75%, 여성 4/6=66.7%
 --   지역별 A(상위): 서울 1/2=50%, 경기 1/1=100%, 부산 0/1=0%, 대구 0/1=0%, 인천 1/1=100%
 --
--- 실행:
---   PowerShell: Get-Content .\docs\dev_seed_closed_battle_ai_test.sql | docker exec -i todongsan-mysql mysql -uroot -p1234
+-- Run with scripts/seed/Invoke-TodongsanSeed.ps1 -Scenario closed-battle.
 
 -- ============================================================
 -- 1. battle DB
 -- ============================================================
-USE battle;
-
 -- 재실행 안전 정리
 DELETE FROM battle_vote WHERE battle_id = 800013;
 DELETE FROM battle WHERE id = 800013;
@@ -80,7 +77,6 @@ VALUES
 --   C) 즉시 DONE 상태 삽입 (렌더링 확인용 → 아래 주석 해제)
 
 -- [선택] DONE 상태 샘플 리포트 삽입 (프론트 렌더링 확인용)
--- USE insight;
 -- DELETE FROM insight_report WHERE type = 'BATTLE' AND reference_id = 800013;
 -- INSERT INTO insight_report (id, type, reference_id, status, summary, analysis_data,
 --                              raw_prompt, failed_reason,
@@ -101,10 +97,8 @@ VALUES
 -- ============================================================
 -- 검증 쿼리 (실행 후 아래 SELECT로 데이터 확인)
 -- ============================================================
--- USE battle;
 -- SELECT id, title, option_a, option_b, status, option_a_count, option_b_count,
 --        vote_count, winning_option, settled_at FROM battle WHERE id = 800013;
 -- SELECT battle_id, member_id, selected_option FROM battle_vote WHERE battle_id = 800013 ORDER BY member_id;
 --
--- USE insight;
 -- SELECT id, type, reference_id, status FROM insight_report WHERE reference_id = 800013;

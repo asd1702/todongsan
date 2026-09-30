@@ -446,3 +446,42 @@ docs/infra/EC2_DOCKER_DEPLOY.md
 6. docker compose down -v와 docker volume rm/prune은 사용하지 않는다.
 7. 시연 또는 위험 작업 전 mysqldump 백업을 남긴다.
 ```
+
+---
+
+## 17. Kafka / Debezium CDC (로컬)
+
+SSOT는 각 서비스 DB이며, 이벤트는 outbox 테이블 → Debezium(CDC) → Kafka 경로로 발행한다. (루트 `AGENTS.md` 섹션 5)
+
+| 컨테이너 | 이미지 | 호스트 포트 | 내부 주소 |
+|---|---|---|---|
+| kafka | apache/kafka:3.9.1 (KRaft) | 127.0.0.1:9092 | kafka:29092 |
+| kafka-connect | quay.io/debezium/connect:3.0 | 127.0.0.1:18083 | kafka-connect:8083 |
+
+Connect REST는 insight-reputation-service(8083)와 겹치지 않도록 호스트 포트 18083을 사용한다.
+
+### 실행 순서
+
+```bash
+cd infra
+docker compose up -d market-mysql                      # binlog/GTID 설정 포함
+docker compose -f docker-compose.kafka.yml up -d       # kafka + kafka-connect
+
+# Debezium 전용 계정 생성 (최초 1회, 재실행 안전)
+docker exec -i market-mysql mysql -uroot -p<MARKET_MYSQL_ROOT_PASSWORD> < debezium/market-debezium-user.sql
+```
+
+### 확인
+
+```bash
+curl -s http://localhost:18083/connector-plugins   # io.debezium.connector.mysql.MySqlConnector 포함 여부
+docker exec market-mysql mysql -uroot -p<PW> -e "SELECT @@log_bin, @@binlog_format, @@binlog_row_image, @@gtid_mode"
+```
+
+Git Bash에서 `docker exec kafka /opt/kafka/bin/...`를 실행할 때는 경로 변환을 막기 위해 `MSYS_NO_PATHCONV=1`을 붙인다.
+
+### 커넥터 설정 주의
+
+- MySQL 컨테이너의 `TZ=Asia/Seoul` 때문에 서버 time zone이 `KST`로 잡혀 JDBC 연결이 실패한다. 커넥터 설정에 `"database.connectionTimeZone": "Asia/Seoul"`을 반드시 넣는다.
+- `DATETIME` 컬럼은 time zone 정보 없이 epoch millis(UTC 기준 해석)로 발행된다. Consumer는 이 값을 KST 로컬 시각으로 해석해야 한다.
+- 종료: `docker compose -f docker-compose.kafka.yml down` (`-v` 사용 금지)

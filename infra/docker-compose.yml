@@ -40,6 +40,12 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
+      # Debezium CDC용 binlog 설정 (MySQL 8.4 기본값이지만 명시한다)
+      - --server-id=2
+      - --log-bin=mysql-bin
+      - --binlog-row-image=FULL
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
     volumes:
       - market_mysql_data:/var/lib/mysql
     healthcheck:

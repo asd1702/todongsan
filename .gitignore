@@ -15,6 +15,7 @@ out/
 # =========================
 .gradle/
 build/
+insight-reputation/bin/
 
 # =========================
 # Java
@@ -90,3 +91,5 @@ application-local.properties
 !application-prod.yml
 application-prod.yaml
 application-prod.properties
+scripts/resilience/results/
+reports/bench/

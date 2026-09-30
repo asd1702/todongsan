@@ -1,6 +1,7 @@
 package com.todongsan.marketservice.market.controller;
 
 import com.todongsan.marketservice.global.response.ApiResponse;
+import com.todongsan.marketservice.market.debug.MarketPredictionDeadlockDebug;
 import com.todongsan.marketservice.market.dto.request.CreatePredictionRequest;
 import com.todongsan.marketservice.market.dto.request.QuoteMarketPredictionRequest;
 import com.todongsan.marketservice.market.dto.response.CreatePredictionResponse;
@@ -50,6 +51,7 @@ public class MarketController {
     private final MarketService marketService;
     private final MarketPredictionQueryService marketPredictionQueryService;
     private final MarketPredictionService marketPredictionService;
+    private final MarketPredictionDeadlockDebug deadlockDebug;
 
     @GetMapping
     @Operation(
@@ -128,6 +130,7 @@ public class MarketController {
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @RequestBody CreatePredictionRequest request
     ) {
+        deadlockDebug.requestStart(marketId, memberId);
         CreatePredictionResponse response = marketPredictionService.createPrediction(
                 marketId,
                 memberId,

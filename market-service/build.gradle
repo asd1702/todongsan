@@ -52,3 +52,17 @@ dependencies {
 tasks.named('test') {
     useJUnitPlatform()
 }
+
+tasks.withType(Test).configureEach {
+    if (System.getProperty("bench.enabled") == "true") {
+        testLogging {
+            showStandardStreams = true
+        }
+    }
+
+    System.getProperties()
+            .findAll { key, value -> key.toString().startsWith("bench.") }
+            .each { key, value ->
+                systemProperty key.toString(), value
+            }
+}

@@ -149,11 +149,6 @@ public interface MarketMapper {
 
     List<MyMarketPredictionRow> selectPredictionsByMemberId(MyMarketPredictionSearchCondition condition);
 
-    MarketPrediction lockPredictionByMarketIdAndMemberId(
-            @Param("marketId") long marketId,
-            @Param("memberId") long memberId
-    );
-
     MarketPrediction selectPredictionById(@Param("predictionId") long predictionId);
 
     MarketPrediction lockPredictionById(@Param("predictionId") long predictionId);

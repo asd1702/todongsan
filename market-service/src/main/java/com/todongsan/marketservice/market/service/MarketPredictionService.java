@@ -10,6 +10,7 @@ import com.todongsan.marketservice.market.client.exception.MemberPointExternalEx
 import com.todongsan.marketservice.market.client.exception.MemberPointTimeoutException;
 import com.todongsan.marketservice.market.client.exception.MemberPointUnavailableException;
 import com.todongsan.marketservice.market.client.exception.PointInsufficientException;
+import com.todongsan.marketservice.market.debug.MarketPredictionDeadlockDebug;
 import com.todongsan.marketservice.market.dto.request.CreatePredictionRequest;
 import com.todongsan.marketservice.market.dto.request.QuoteMarketPredictionRequest;
 import com.todongsan.marketservice.market.dto.response.CreatePredictionResponse;
@@ -28,6 +29,7 @@ public class MarketPredictionService {
 
     private final MarketPredictionTransactionService transactionService;
     private final MemberPointClient memberPointClient;
+    private final MarketPredictionDeadlockDebug deadlockDebug;
 
     public CreatePredictionResponse createPrediction(
             long marketId,
@@ -49,6 +51,7 @@ public class MarketPredictionService {
             throw new CustomException(MarketErrorCode.MARKET_ALREADY_PREDICTED);
         }
         try {
+            deadlockDebug.phase("POINT_SPEND_START", prediction.getId());
             memberPointClient.spend(new PointSpendCommand(
                     memberId,
                     SPEND_TYPE,
@@ -57,6 +60,7 @@ public class MarketPredictionService {
                     prediction.getId(),
                     prediction.getPointSpendIdempotencyKey()
             ));
+            deadlockDebug.phase("POINT_SPEND_END", prediction.getId());
         } catch (PointInsufficientException e) {
             transactionService.markPredictionFailed(prediction.getId(), failureReason(e, "POINT_INSUFFICIENT"));
             throw new CustomException(PointErrorCode.POINT_INSUFFICIENT);

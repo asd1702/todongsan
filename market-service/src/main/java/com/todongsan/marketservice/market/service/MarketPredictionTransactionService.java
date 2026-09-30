@@ -6,6 +6,7 @@ import com.todongsan.marketservice.market.dto.request.CreatePredictionRequest;
 import com.todongsan.marketservice.market.dto.request.QuoteMarketPredictionRequest;
 import com.todongsan.marketservice.market.dto.response.CreatePredictionResponse;
 import com.todongsan.marketservice.market.dto.response.QuoteMarketPredictionResponse;
+import com.todongsan.marketservice.market.debug.MarketPredictionDeadlockDebug;
 import com.todongsan.marketservice.market.entity.Market;
 import com.todongsan.marketservice.market.entity.MarketOption;
 import com.todongsan.marketservice.market.entity.MarketPrediction;
@@ -38,6 +39,7 @@ public class MarketPredictionTransactionService {
             "현재 가격은 실시간으로 변동될 수 있으며, 실제 참여 시점의 가격 기준으로 계약 수량이 확정됩니다.";
 
     private final MarketMapper marketMapper;
+    private final MarketPredictionDeadlockDebug deadlockDebug;
 
     @Transactional
     public MarketPrediction createPendingPrediction(
@@ -46,12 +48,15 @@ public class MarketPredictionTransactionService {
             String idempotencyKey,
             CreatePredictionRequest request
     ) {
+        deadlockDebug.phase("TX1_START", null);
         LocalDateTime now = LocalDateTime.now();
         Market market = getMarket(marketId);
         validateMarketForPrediction(market, now);
         MarketOption option = getMarketOption(marketId, request.getMarketOptionId());
         validatePointAmount(request.getPointAmount());
-        MarketPrediction prediction = marketMapper.lockPredictionByMarketIdAndMemberId(marketId, memberId);
+        deadlockDebug.phase("PREDICTION_EXISTING_LOOKUP_BEFORE", null);
+        MarketPrediction prediction = marketMapper.selectPredictionByMarketIdAndMemberId(marketId, memberId);
+        deadlockDebug.phase("PREDICTION_EXISTING_LOOKUP_AFTER", prediction == null ? null : prediction.getId());
         if (prediction != null) {
             return retryFailedPrediction(prediction, option, request, idempotencyKey, now);
         }
@@ -66,7 +71,10 @@ public class MarketPredictionTransactionService {
         prediction.setPointSpendIdempotencyKey(pointSpendIdempotencyKey(idempotencyKey, prediction.getAttemptNo()));
         prediction.setCreatedAt(now);
         prediction.setUpdatedAt(now);
+        deadlockDebug.phase("PREDICTION_INSERT_BEFORE", null);
         marketMapper.insertPrediction(prediction);
+        deadlockDebug.phase("PREDICTION_INSERT_AFTER", prediction.getId());
+        deadlockDebug.phase("TX1_BODY_END", prediction.getId());
         return prediction;
     }
 
@@ -301,12 +309,15 @@ public class MarketPredictionTransactionService {
             Set<MarketStatus> allowedMarketStatuses,
             boolean skipOnInvalidState
     ) {
+        deadlockDebug.phase("TX2_START", predictionId);
         MarketPrediction initialPrediction = marketMapper.selectPredictionById(predictionId);
         if (initialPrediction == null || hasMissingReconciliationData(initialPrediction)) {
             return confirmationFailure(skipOnInvalidState);
         }
 
+        deadlockDebug.phase("MARKET_LOCK_BEFORE", predictionId);
         Market market = marketMapper.lockMarketById(initialPrediction.getMarketId());
+        deadlockDebug.phase("MARKET_LOCK_ACQUIRED", predictionId);
         if (market == null) {
             if (skipOnInvalidState) {
                 return PredictionConfirmationResult.skipped();
@@ -317,8 +328,12 @@ public class MarketPredictionTransactionService {
             return confirmationFailure(skipOnInvalidState);
         }
 
+        deadlockDebug.phase("OPTIONS_LOCK_BEFORE", predictionId);
         List<MarketOption> options = marketMapper.lockOptionsByMarketId(market.getId());
+        deadlockDebug.phase("OPTIONS_LOCK_ACQUIRED", predictionId);
+        deadlockDebug.phase("PREDICTION_LOCK_BEFORE", predictionId);
         MarketPrediction prediction = marketMapper.lockPredictionById(predictionId);
+        deadlockDebug.phase("PREDICTION_LOCK_ACQUIRED", predictionId);
         if (prediction == null
                 || hasMissingReconciliationData(prediction)
                 || !allowedPredictionStatuses.contains(prediction.getStatus())) {
@@ -362,14 +377,19 @@ public class MarketPredictionTransactionService {
             option.setCurrentPrice(effectivePool(option).divide(totalEffectivePool, PRICE_SCALE, RoundingMode.HALF_UP));
             option.setUpdatedAt(now);
         }
+        deadlockDebug.phase("MARKET_UPDATE_BEFORE", predictionId);
         marketMapper.updateMarketTotalPool(market.getId(), prediction.getPointAmount(), now);
+        deadlockDebug.phase("MARKET_UPDATE_AFTER", predictionId);
         for (MarketOption option : options) {
             marketMapper.updateMarketOptionPoolsAndPrice(option);
         }
+        deadlockDebug.phase("PRICE_HISTORY_INSERT_BEFORE", predictionId);
         marketMapper.insertPriceHistoryRows(options.stream()
                 .map(option -> toPriceHistory(predictionId, option, snapshots.get(option.getId()), now))
                 .toList());
+        deadlockDebug.phase("PRICE_HISTORY_INSERT_AFTER", predictionId);
 
+        deadlockDebug.phase("PREDICTION_CONFIRM_UPDATE_BEFORE", predictionId);
         int updatedRows = skipOnInvalidState
                 ? marketMapper.updatePredictionConfirmedForReconciliation(
                         predictionId,
@@ -383,9 +403,11 @@ public class MarketPredictionTransactionService {
                         contractQuantity,
                         now
                 );
+        deadlockDebug.phase("PREDICTION_CONFIRM_UPDATE_AFTER", predictionId);
         if (updatedRows != 1) {
             return confirmationFailure(skipOnInvalidState);
         }
+        deadlockDebug.phase("TX2_BODY_END", predictionId);
         return PredictionConfirmationResult.confirmed(new CreatePredictionResponse(
                 predictionId,
                 market.getId(),

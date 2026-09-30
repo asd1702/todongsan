@@ -74,3 +74,10 @@ client:
   market:
     base-url: ${MARKET_SERVICE_BASE_URL:http://localhost:8082}
     internal-auth-token: ${MARKET_INTERNAL_AUTH_TOKEN:local-internal-token}
+    connect-timeout-ms: ${MARKET_CLIENT_CONNECT_TIMEOUT_MS:500}
+    read-timeout-ms: ${MARKET_CLIENT_READ_TIMEOUT_MS:1000}
+
+todongsan:
+  resilience:
+    market-client:
+      enabled: ${RESILIENCE_MARKET_CLIENT_ENABLED:false}

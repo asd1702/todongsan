@@ -1,0 +1,22 @@
+todongsan:
+  resilience:
+    market-client:
+      enabled: ${RESILIENCE_MARKET_CLIENT_ENABLED:true}
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      marketClient:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 4
+        minimum-number-of-calls: 4
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 3s
+        permitted-number-of-calls-in-half-open-state: 2
+        automatic-transition-from-open-to-half-open-enabled: true
+        record-failure-predicate: com.todongsan.insightreputation.global.client.MarketClientCircuitBreakerFailurePredicate
+  bulkhead:
+    instances:
+      marketClient:
+        max-concurrent-calls: 2
+        max-wait-duration: 0ms

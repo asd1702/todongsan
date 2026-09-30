@@ -3,9 +3,9 @@ package com.todongsan.insightreputation.global.client;
 import com.todongsan.insightreputation.global.exception.CustomException;
 import com.todongsan.insightreputation.global.exception.errorcode.ErrorCode;
 import com.todongsan.insightreputation.global.response.ApiResponse;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -22,10 +22,19 @@ import java.util.List;
 
 @Slf4j
 @Component
-@RequiredArgsConstructor
 public class MarketClient {
 
     private final RestTemplate restTemplate;
+    private final RestTemplate marketRestTemplate;
+    private final MarketClientResilienceExecutor resilienceExecutor;
+
+    public MarketClient(RestTemplate restTemplate,
+                        @Qualifier("marketRestTemplate") RestTemplate marketRestTemplate,
+                        MarketClientResilienceExecutor resilienceExecutor) {
+        this.restTemplate = restTemplate;
+        this.marketRestTemplate = marketRestTemplate;
+        this.resilienceExecutor = resilienceExecutor;
+    }
     
     @Value("${client.market.base-url:http://market-service}")
     private String marketServiceBaseUrl;
@@ -183,12 +192,16 @@ public class MarketClient {
     }
 
     public ActiveMarketInfoResponse getActiveMarketInfo(long marketId) {
+        return resilienceExecutor.execute(() -> getActiveMarketInfoDirect(marketId));
+    }
+
+    private ActiveMarketInfoResponse getActiveMarketInfoDirect(long marketId) {
         String url = String.format("%s/internal/api/v1/markets/%d/basic-info", marketServiceBaseUrl, marketId);
 
         try {
             log.info("Market Service 기본 정보 조회 요청: marketId={}", marketId);
 
-            ApiResponse<Object> response = restTemplate.exchange(
+            ApiResponse<Object> response = marketRestTemplate.exchange(
                 url, HttpMethod.GET, internalAuthEntity(), ApiResponse.class).getBody();
 
             if (response == null || !response.isSuccess()) {

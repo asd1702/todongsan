@@ -494,17 +494,28 @@ Git Bash에서 `docker exec kafka /opt/kafka/bin/...`를 실행할 때는 경로
 # 1) member-point-mysql도 binlog/GTID 설정 포함. Debezium 계정 (최초 1회, 재실행 안전)
 docker exec -i member-point-mysql mysql -uroot -p<MEMBERPOINT_MYSQL_ROOT_PASSWORD> < infra/debezium/memberpoint-debezium-user.sql
 
-# 2) Market outbox 커넥터 등록/갱신 (PUT, 재실행 안전)
+# 2) outbox 커넥터 등록/갱신 (PUT, 재실행 안전). 각 서비스를 한 번 기동해 Flyway V2가 적용된 뒤 등록한다
 ./infra/debezium/register-connector.sh market-outbox
+./infra/debezium/register-connector.sh memberpoint-outbox
 
 # 3) 서비스 실행 시 환경 변수
-#    market-service:       MARKET_POINT_TRANSPORT_MODE=async   (기본 sync)
-#                          MARKET_POINT_REQUEST_KEY=member_id  (실험 시 market_id)
+#    market-service:       MARKET_POINT_TRANSPORT_MODE=async        (기본 sync)
+#                          MARKET_POINT_REQUEST_KEY=member_id       (실험 시 market_id)
+#                          MARKET_POINT_RESULTS_CONSUMER_ENABLED=true (기본 false)
 #    member-point-service: MARKET_POINT_REQUESTS_CONSUMER_ENABLED=true (기본 false)
-#                          KAFKA_BOOTSTRAP_SERVERS=localhost:9092 (컨테이너 내부에서는 kafka:29092)
+#    공통:                 KAFKA_BOOTSTRAP_SERVERS=localhost:9092 (컨테이너 내부에서는 kafka:29092)
 ```
 
 | 토픽 | 발행 | 소비 | key |
 |---|---|---|---|
 | `market.point-requests` | Debezium (`market_outbox_event`) | member-point-service | `member_id` |
 | `market.point-requests-dlt` | member-point-service (처리 실패) | 수동 확인 | 원본 key |
+| `memberpoint.point-results` | Debezium (`point_outbox_event`) | market-service | `market_id` |
+| `memberpoint.point-results-dlt` | market-service (처리 실패) | 수동 확인 | 원본 key |
+
+consumer 적체 확인 (파이프라인 정체 감지, ASYNC_POINT_FLOW.md §6.3):
+
+```bash
+MSYS_NO_PATHCONV=1 docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:29092 --describe --group member-point-service   # 또는 market-service
+```

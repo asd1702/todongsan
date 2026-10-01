@@ -24,8 +24,8 @@ import org.springframework.stereotype.Service;
 @RequiredArgsConstructor
 public class MarketPredictionService {
 
-    private static final String SPEND_TYPE = "SPEND_MARKET";
-    private static final String REFERENCE_TYPE = "MARKET_PREDICTION";
+    static final String SPEND_TYPE = "SPEND_MARKET";
+    static final String REFERENCE_TYPE = "MARKET_PREDICTION";
 
     private final MarketPredictionTransactionService transactionService;
     private final MemberPointClient memberPointClient;

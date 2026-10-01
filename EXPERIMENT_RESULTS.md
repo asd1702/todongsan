@@ -153,3 +153,18 @@
 
 - MP는 토픽마다 listener container가 따로라 파티션 6개(토픽 2 × 3)를 각각 배정받는다.
 - 전환 시 기존 `market.point-requests`는 lag 0 상태로 남아 있다. 비운 것을 확인했으므로 삭제 가능 (§8.3 전환 절차).
+
+## ⑧ spend 펜싱 (늦게 도착한 spend)
+
+실행일: 2026-10-01 / 설계: `docs/architecture/ASYNC_POINT_FLOW.md` §12.6, `MEMBER_POINT_API_SPEC.md` 3-5
+
+재현: 시드 예측 2건을 spend timeout 직후 상태(`POINT_UNKNOWN`, MP 기록 없음)로 만들고, 원래 Market이 보냈던 것과 같은 spend 요청을 MP에 직접 보내 "늦게 도착한 spend"를 흉내 냈다 (run 30).
+
+| 예측 | 순서 | 결과 |
+|---|---|---|
+| A | 대사(NOT_FOUND → 펜싱) → 늦은 spend | Market `FAILED`(`POINT_SPEND_FENCED`), MP 기록 `FAILED`(`POINT_SPEND_FENCED`). 늦은 spend는 **409 `POINT_SPEND_FENCED`로 거절, 잔액 변화 없음**. 같은 키에 금액을 바꾼 요청은 `IDEMPOTENCY_KEY_CONFLICT` |
+| B | 늦은 spend → 대사 | 대사가 `PROCESSED`를 보고 `CONFIRMED` (forward recovery). 차감 120P 1회 |
+
+- 대사 결과: scanned 2 / confirmed 1 / failed 1 / notFound 1. 펜싱 이전에는 A가 `FAILED` 뒤 차감만 남는 경로였다.
+- 조회와 펜싱 사이에 spend가 먼저 커밋되는 경쟁은 E2E로 타이밍을 맞추기 어려워 단위 테스트로 확인했다 (`PointSpendFenceRaceTest`: 펜싱 INSERT가 UNIQUE에 걸리면 먼저 커밋된 `PROCESSED`를 반환). 반대 순서(펜싱이 먼저)는 spend의 INSERT가 UNIQUE에 걸려 같은 트랜잭션의 잔액 차감이 롤백된다.
+- 주의: 재현 중 Windows 셸에서 curl 본문의 한글이 UTF-8로 전송되지 않아 MP가 400대 대신 500(JSON 파싱 실패)을 낸 run 29는 무효 처리했다.

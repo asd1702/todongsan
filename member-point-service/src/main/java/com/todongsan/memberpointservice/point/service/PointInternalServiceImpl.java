@@ -13,8 +13,11 @@ import com.todongsan.memberpointservice.point.entity.PointReferenceType;
 import com.todongsan.memberpointservice.point.entity.PointTransactionStatus;
 import com.todongsan.memberpointservice.point.repository.PointHistoryRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -29,6 +32,7 @@ public class PointInternalServiceImpl implements PointInternalService {
 
     private final MemberRepository memberRepository;
     private final PointHistoryRepository pointHistoryRepository;
+    private final TransactionTemplate transactionTemplate;
 
     @Override
     @Transactional
@@ -101,6 +105,9 @@ public class PointInternalServiceImpl implements PointInternalService {
                     request.getAmount(), request.getReferenceType(), request.getReferenceId());
             if (newHash.equals(history.getRequestHash())) {
                 if (history.getStatus() == PointTransactionStatus.FAILED) {
+                    if (ErrorCode.POINT_SPEND_FENCED.getCode().equals(history.getFailReason())) {
+                        throw new CustomException(ErrorCode.POINT_SPEND_FENCED);
+                    }
                     throw new CustomException(ErrorCode.POINT_INSUFFICIENT);
                 }
                 return PointResult.alreadyProcessed(new SpendResponse(history));
@@ -201,7 +208,66 @@ public class PointInternalServiceImpl implements PointInternalService {
 
         }
 
-        PointHistory history = opt.get();
+        return toTransactionResponse(opt.get());
+    }
+
+    /**
+     * 대사가 NOT_FOUND를 확인한 차감 요청을 실패로 먼저 기록해, 늦게 도착한 spend가 차감하지 못하게 한다 (ASYNC_POINT_FLOW.md §12.6).
+     * 펜싱과 spend가 동시에 실행되면 idempotency_key UNIQUE가 하나만 통과시킨다. 펜싱 INSERT가 충돌하면 먼저 커밋된 기록을 반환한다.
+     */
+    @Override
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    public TransactionResponse fenceSpend(String idempotencyKey, SpendRequest request) {
+        if (idempotencyKey == null || idempotencyKey.isBlank()) {
+            throw new CustomException(ErrorCode.IDEMPOTENCY_KEY_REQUIRED);
+        }
+        try {
+            return transactionTemplate.execute(status -> fenceInTransaction(idempotencyKey, request));
+        } catch (DataIntegrityViolationException e) {
+            return pointHistoryRepository.findByIdempotencyKey(idempotencyKey)
+                    .map(PointInternalServiceImpl::toTransactionResponse)
+                    .orElseThrow(() -> e);
+        }
+    }
+
+    private TransactionResponse fenceInTransaction(String idempotencyKey, SpendRequest request) {
+        if (request.getAmount() == null || request.getAmount().compareTo(BigDecimal.ZERO) <= 0) {
+            throw new CustomException(ErrorCode.POINT_INVALID_AMOUNT);
+        }
+        String requestHash = RequestHashUtil.compute(
+                request.getMemberId(), request.getType(),
+                request.getAmount(), request.getReferenceType(), request.getReferenceId());
+
+        Optional<PointHistory> existing = pointHistoryRepository.findByIdempotencyKey(idempotencyKey);
+        if (existing.isPresent()) {
+            if (!requestHash.equals(existing.get().getRequestHash())) {
+                throw new CustomException(ErrorCode.IDEMPOTENCY_KEY_CONFLICT);
+            }
+            return toTransactionResponse(existing.get());
+        }
+
+        PointReferenceType refType = parseReferenceType(request.getReferenceType());
+        PointHistoryType histType = parseHistoryType(request.getType());
+        Member member = memberRepository.findByIdAndDeletedAtIsNull(request.getMemberId())
+                .orElseThrow(() -> new CustomException(ErrorCode.MEMBER_NOT_FOUND));
+
+        PointHistory fenced = PointHistory.builder()
+                .memberId(request.getMemberId())
+                .type(histType)
+                .amount(request.getAmount().setScale(2, RoundingMode.DOWN))
+                .balanceSnapshot(member.getPointBalance())
+                .reason(request.getReason())
+                .referenceType(refType)
+                .referenceId(request.getReferenceId())
+                .idempotencyKey(idempotencyKey)
+                .requestHash(requestHash)
+                .status(PointTransactionStatus.FAILED)
+                .failReason(ErrorCode.POINT_SPEND_FENCED.getCode())
+                .build();
+        return toTransactionResponse(pointHistoryRepository.saveAndFlush(fenced));
+    }
+
+    private static TransactionResponse toTransactionResponse(PointHistory history) {
         String status = history.getStatus() == PointTransactionStatus.SUCCEEDED ? "PROCESSED" : "FAILED";
 
         return TransactionResponse.builder()

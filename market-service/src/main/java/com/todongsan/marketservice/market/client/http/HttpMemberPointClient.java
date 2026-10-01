@@ -59,7 +59,18 @@ public class HttpMemberPointClient implements MemberPointClient {
 
     @Override
     public MemberPointTransactionStatusResponse getTransactionStatus(String idempotencyKey) {
-        TransactionStatusResponse response = unwrap(call(() -> feignClient.getTransactionStatus(idempotencyKey)));
+        return toStatusResponse(unwrap(call(() -> feignClient.getTransactionStatus(idempotencyKey))));
+    }
+
+    @Override
+    public MemberPointTransactionStatusResponse fenceSpend(PointSpendCommand command) {
+        return toStatusResponse(unwrap(call(() -> feignClient.fenceSpend(
+                command.idempotencyKey(),
+                MemberPointHttpDtos.SpendRequest.from(command, SPEND_REASON)
+        ))));
+    }
+
+    private MemberPointTransactionStatusResponse toStatusResponse(TransactionStatusResponse response) {
         return new MemberPointTransactionStatusResponse(
                 response.idempotencyKey(),
                 transactionStatus(response.status()),

@@ -35,7 +35,7 @@
 | `POINT_HISTORY_NOT_FOUND` | 404 | 포인트 내역을 찾을 수 없습니다. | (현재 미사용) ErrorCode enum에 정의만 있고 실제로 throw하는 코드가 없음 | X | 변경 없음 | 해당 없음 (실제로 발생하지 않음) |
 | `POINT_ORIGINAL_TRANSACTION_NOT_FOUND` | 404 | 환불/정산 대상 원본 거래를 찾을 수 없습니다. | (현재 미사용) ErrorCode enum에 정의만 있고 실제로 throw하는 코드가 없음 (정산/환불은 원본 거래 존재 여부를 검증하지 않음) | X | 변경 없음 | 해당 없음 (실제로 발생하지 않음) |
 | `POINT_INVALID_REFERENCE_TYPE` | 400 | 유효하지 않은 referenceType입니다. | referenceType이 BATTLE/MARKET_PREDICTION/INSIGHT_REPORT 외 값 | X | 변경 없음 | 호출 측 코드 수정 필요 |
-| `POINT_SPEND_FENCED` | 409 | 처리가 중단된 차감 요청입니다. | (도입 예정) Market 대사가 펜싱(`POST /internal/api/v1/points/spend/fence`)한 Idempotency-Key로 spend 요청이 도착 | X | point_balance 변경 없음. 펜싱 시 point_history FAILED(fail_reason=`POINT_SPEND_FENCED`) 기록 | 해당 없음 (내부 지연 요청, 호출자는 이미 timeout) |
+| `POINT_SPEND_FENCED` | 409 | 처리가 중단된 차감 요청입니다. | Market 대사가 펜싱(`POST /internal/api/v1/points/spend/fence`)한 Idempotency-Key로 spend 요청이 도착 | X | point_balance 변경 없음. 펜싱 시 point_history FAILED(fail_reason=`POINT_SPEND_FENCED`) 기록 | 해당 없음 (내부 지연 요청, 호출자는 이미 timeout) |
 
 ---
 
@@ -173,11 +173,11 @@
 | `POINT_INSUFFICIENT` | point_balance 부족 |
 | `POINT_INVALID_AMOUNT` | amount <= 0 |
 | `POINT_INVALID_REFERENCE_TYPE` | 유효하지 않은 referenceType |
-| `POINT_SPEND_FENCED` | (도입 예정) 펜싱된 키로 요청 |
+| `POINT_SPEND_FENCED` | 펜싱된 키로 요청 (차감하지 않음) |
 
 ---
 
-### 3-12-1. POST /internal/api/v1/points/spend/fence (차감 펜싱, 도입 예정)
+### 3-12-1. POST /internal/api/v1/points/spend/fence (차감 펜싱)
 
 | ErrorCode | 발생 상황 |
 |---|---|

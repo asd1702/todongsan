@@ -32,6 +32,7 @@ public enum ErrorCode {
     POINT_HISTORY_NOT_FOUND("POINT_HISTORY_NOT_FOUND", "포인트 내역을 찾을 수 없습니다.", HttpStatus.NOT_FOUND),
     POINT_ORIGINAL_TRANSACTION_NOT_FOUND("POINT_ORIGINAL_TRANSACTION_NOT_FOUND", "환불/정산 대상 원본 거래를 찾을 수 없습니다.", HttpStatus.NOT_FOUND),
     POINT_INVALID_REFERENCE_TYPE("POINT_INVALID_REFERENCE_TYPE", "유효하지 않은 referenceType입니다.", HttpStatus.BAD_REQUEST),
+    POINT_SPEND_FENCED("POINT_SPEND_FENCED", "처리가 중단된 차감 요청입니다.", HttpStatus.CONFLICT),
 
     // 멱등성
     IDEMPOTENCY_KEY_REQUIRED("IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key 헤더가 필요합니다.", HttpStatus.BAD_REQUEST),

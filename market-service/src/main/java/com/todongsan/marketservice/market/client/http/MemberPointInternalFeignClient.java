@@ -27,6 +27,12 @@ public interface MemberPointInternalFeignClient {
             @RequestBody SpendRequest request
     );
 
+    @PostMapping("/internal/api/v1/points/spend/fence")
+    MemberPointApiResponse<TransactionStatusResponse> fenceSpend(
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @RequestBody SpendRequest request
+    );
+
     @GetMapping("/internal/api/v1/points/transactions")
     MemberPointApiResponse<TransactionStatusResponse> getTransactionStatus(
             @RequestParam("idempotencyKey") String idempotencyKey

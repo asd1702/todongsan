@@ -64,6 +64,14 @@ class MemberPointClientBeanConditionTest {
         }
 
         @Override
+        public MemberPointApiResponse<MemberPointHttpDtos.TransactionStatusResponse> fenceSpend(
+                String idempotencyKey,
+                MemberPointHttpDtos.SpendRequest request
+        ) {
+            return null;
+        }
+
+        @Override
         public MemberPointApiResponse<MemberPointHttpDtos.SettlementBatchResponse> settleMarketRewards(
                 String idempotencyKey,
                 MemberPointHttpDtos.SettlementBatchRequest request

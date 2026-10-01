@@ -93,6 +93,28 @@ class HttpMemberPointClientTest {
         assertThat(response.errorCode()).isEqualTo("POINT_INSUFFICIENT");
     }
 
+    /** 펜싱은 원래 spend와 같은 요청 내용을 보내야 MP request_hash가 일치한다 (ASYNC_POINT_FLOW.md §12.6). */
+    @Test
+    void fenceSpendSendsSameRequestAsSpendAndMapsFencedStatus() {
+        CapturingFeignClient feignClient = new CapturingFeignClient();
+        feignClient.transactionResponse = ok(new MemberPointHttpDtos.TransactionStatusResponse(
+                "key", "FAILED", 10L, "SPEND_MARKET", new BigDecimal("100.00"), "MARKET_PREDICTION", 1001L,
+                new BigDecimal("500.00"), null, "POINT_SPEND_FENCED", null
+        ));
+        HttpMemberPointClient client = new HttpMemberPointClient(feignClient);
+
+        var response = client.fenceSpend(new PointSpendCommand(
+                10L, "SPEND_MARKET", new BigDecimal("100.00"), "MARKET_PREDICTION", 1001L, "key"));
+
+        assertThat(feignClient.idempotencyKey).isEqualTo("key");
+        assertThat(feignClient.spendRequest.memberId()).isEqualTo(10L);
+        assertThat(feignClient.spendRequest.amount()).isEqualByComparingTo("100.00");
+        assertThat(feignClient.spendRequest.referenceId()).isEqualTo(1001L);
+        assertThat(feignClient.spendRequest.reason()).isEqualTo("Market 예측 참여");
+        assertThat(response.status()).isEqualTo(MemberPointTransactionStatus.FAILED);
+        assertThat(response.errorCode()).isEqualTo("POINT_SPEND_FENCED");
+    }
+
     @Test
     void settlementSendsHeaderAndBodySettlementIdWithItemResults() {
         CapturingFeignClient feignClient = new CapturingFeignClient();
@@ -223,6 +245,16 @@ class HttpMemberPointClientTest {
                 String idempotencyKey
         ) {
             this.idempotencyKey = idempotencyKey;
+            return transactionResponse;
+        }
+
+        @Override
+        public MemberPointApiResponse<MemberPointHttpDtos.TransactionStatusResponse> fenceSpend(
+                String idempotencyKey,
+                MemberPointHttpDtos.SpendRequest request
+        ) {
+            this.idempotencyKey = idempotencyKey;
+            this.spendRequest = request;
             return transactionResponse;
         }
 

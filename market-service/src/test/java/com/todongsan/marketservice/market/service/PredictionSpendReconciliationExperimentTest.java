@@ -1,11 +1,13 @@
 package com.todongsan.marketservice.market.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.when;
 
 import com.todongsan.marketservice.market.client.MemberPointClient;
+import com.todongsan.marketservice.market.client.PointSpendCommand;
 import com.todongsan.marketservice.market.client.MemberPointTransactionStatus;
 import com.todongsan.marketservice.market.client.MemberPointTransactionStatusResponse;
 import com.todongsan.marketservice.market.client.exception.MemberPointTimeoutException;
@@ -96,6 +98,12 @@ class PredictionSpendReconciliationExperimentTest {
                 default -> transactionStatus(key, MemberPointTransactionStatus.NOT_FOUND, null);
             };
         });
+        // NOT_FOUND는 펜싱 후 FAILED로 확정된다 (MP: 기록이 없으면 POINT_SPEND_FENCED로 기록, ASYNC_POINT_FLOW.md §12.6)
+        when(memberPointClient.fenceSpend(any(PointSpendCommand.class))).thenAnswer(invocation -> transactionStatus(
+                invocation.<PointSpendCommand>getArgument(0).idempotencyKey(),
+                MemberPointTransactionStatus.FAILED,
+                "POINT_SPEND_FENCED"
+        ));
     }
 
     private MemberPointTransactionStatusResponse transactionStatus(

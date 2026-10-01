@@ -1,6 +1,6 @@
 # Market ↔ Member-Point 비동기 포인트 흐름 설계
 
-> 상태: **구현 중** (1~5단계 완료, 결과 반영 배치화·DB 장애 대기 완료(§16), 요청 토픽 분리 완료(§8.3). 다음: 6단계 펜싱)
+> 상태: **1~6단계 구현 완료** (결과 반영 배치화·DB 장애 대기(§16), 요청 토픽 분리(§8.3), spend 펜싱(§12.6)). 남은 과제: CI 스키마 호환성 검사(E3), Connect 정지 경보(§16.2)
 > 범위: Market Service ↔ Member-Point Service. Battle / Insight 연계는 이 문서의 범위가 아니다.
 > 상위 원칙: 루트 `AGENTS.md` 섹션 5 "비동기 이벤트 원칙 (DB = SSOT, CDC)"
 
@@ -405,7 +405,7 @@ CREATE TABLE market_outbox_event (          -- member-point: point_outbox_event
 | 5 | 정리: DLT 재발행 스크립트 (R3), DLT 경고·lag·커넥터 점검 절차 (R6, §6.3), outbox 삭제 (R7), 실험 수행 및 결과 기록 | 전체 테스트, 실험 결과 문서화 |
 | 5+ | **결과 반영 배치화 + DB 장애 대기** — **완료** (§16): Market 결과 consumer batch listener, 배치 내 실패 격리, 두 consumer의 DB 장애 대기 (R8) | 정합성 테스트, suite before/after, 장애 주입 E2E (`EXPERIMENT_RESULTS.md` ⑥) |
 | 5++ | **요청 토픽 분리** — **완료** (§8.1 E5, §8.3): 정산 지급 / 환불 요청 토픽 분리, MP listener 분리, 결과 토픽 유지 | 스키마·계약 테스트, 소규모 E2E, MP 재기동 |
-| 6 | **spend 펜싱** (§12.6): MP `POST /internal/api/v1/points/spend/fence`, Market 대사 `NOT_FOUND` 처리 변경 | 펜싱 후 늦게 도착한 spend가 차감하지 못함, 펜싱과 spend 동시 실행 시 결과가 하나로 결정됨 |
+| 6 | **spend 펜싱** — **완료** (§12.6): MP `POST /internal/api/v1/points/spend/fence`, Market 대사 `NOT_FOUND` 처리 변경 | 펜싱 후 늦게 도착한 spend가 차감하지 못함, 펜싱과 spend 동시 실행 시 결과가 하나로 결정됨 |
 
 환불을 먼저 하는 이유: 원금 반환이라 금액 계산이 없고, 정산은 배당 계산·잔여 소각·reputation task 생성이 얽혀 있다.
 item 단위 처리 구조는 동일하므로 환불로 파이프라인을 검증한 뒤 정산에 적용한다.
@@ -494,7 +494,7 @@ MP가 Market의 prediction 데이터를 알아야 하므로 서비스 경계가 
 | 정산 완료 → Insight 신뢰도 업데이트 | Market은 결과를 기다리지 않는다. 현재 `market_reputation_update` polling을 이벤트 구독으로 대체 가능 |
 | 정산·무효 → 알림, 분석 (향후) | 구독자를 추가해도 Market 변경이 필요 없다 |
 
-### 12.6 늦게 도착한 spend — 펜싱으로 예방 (확정)
+### 12.6 늦게 도착한 spend — 펜싱으로 예방 (구현 완료)
 
 **문제.** 대사에서 MP 거래가 `NOT_FOUND`면 prediction을 즉시 `FAILED`(종결)로 바꾼다 (`PredictionSpendReconciliationService`).
 

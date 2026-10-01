@@ -736,8 +736,10 @@ X-Member-Id: {memberId}
 2. point_history에서 idempotency_key 조회
    → 없으면 신규 요청 → 정상 처리
    → 있으면 request_hash 비교
-      동일 → 기존 처리 결과 반환 (status=SUCCEEDED → 200, status=FAILED → 409 POINT_INSUFFICIENT)
+      동일 → 기존 처리 결과 반환 (status=SUCCEEDED → 200,
+              status=FAILED → fail_reason=POINT_SPEND_FENCED면 409 POINT_SPEND_FENCED (3-5 펜싱), 그 외 409 POINT_INSUFFICIENT)
       불일치 → IDEMPOTENCY_KEY_CONFLICT (409)
+   → 조회 후 펜싱이 먼저 커밋되면 7의 INSERT가 idempotency_key UNIQUE 위반으로 실패하고, 6의 차감도 함께 롤백된다
 3. amount 유효성 확인
    → amount <= 0이면 POINT_INVALID_AMOUNT (400)
 4. referenceType / type 유효성 확인
@@ -789,6 +791,7 @@ X-Member-Id: {memberId}
 | `POINT_INSUFFICIENT` | point_balance 부족 |
 | `POINT_INVALID_AMOUNT` | amount <= 0 |
 | `POINT_INVALID_REFERENCE_TYPE` | 유효하지 않은 referenceType |
+| `POINT_SPEND_FENCED` | 대사가 펜싱한 키로 요청 (3-5). 차감하지 않음 |
 
 ---
 
@@ -1033,13 +1036,13 @@ items 순회하며 각 건에 대해:
 
 ---
 
-### 3-5. Market 예측 차감 펜싱 (도입 예정)
+### 3-5. Market 예측 차감 펜싱
 
 ```
 POST /internal/api/v1/points/spend/fence
 ```
 
-> 도입 예정. 설계 근거는 `docs/architecture/ASYNC_POINT_FLOW.md` §12.6을 따른다.
+> 설계 근거는 `docs/architecture/ASYNC_POINT_FLOW.md` §12.6을 따른다.
 
 Market 예측 차감 대사에서 거래 조회 결과가 `NOT_FOUND`일 때, prediction을 `FAILED`로 종결하기 **전에** 호출한다.
 해당 `Idempotency-Key`에 실패 기록을 먼저 남겨, 지연되어 늦게 도착한 `spend`가 차감하지 못하게 한다.

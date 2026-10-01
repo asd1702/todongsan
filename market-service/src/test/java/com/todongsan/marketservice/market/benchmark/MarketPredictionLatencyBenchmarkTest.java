@@ -1084,6 +1084,11 @@ class MarketPredictionLatencyBenchmarkTest {
                 }
 
                 @Override
+                public MemberPointTransactionStatusResponse fenceSpend(PointSpendCommand command) {
+                    throw new UnsupportedOperationException("벤치는 예측 참여 경로만 측정한다");
+                }
+
+                @Override
                 public MemberPointSettlementBatchResponse settleMarketRewards(
                         String batchIdempotencyKey, MemberPointSettlementBatchRequest request) {
                     throw new UnsupportedOperationException("벤치는 예측 참여 경로만 측정한다");

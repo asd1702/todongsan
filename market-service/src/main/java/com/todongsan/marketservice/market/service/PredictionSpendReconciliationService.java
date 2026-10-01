@@ -3,6 +3,7 @@ package com.todongsan.marketservice.market.service;
 import com.todongsan.marketservice.market.client.MemberPointClient;
 import com.todongsan.marketservice.market.client.MemberPointTransactionStatus;
 import com.todongsan.marketservice.market.client.MemberPointTransactionStatusResponse;
+import com.todongsan.marketservice.market.client.PointSpendCommand;
 import com.todongsan.marketservice.market.client.exception.MemberPointExternalException;
 import com.todongsan.marketservice.market.client.exception.MemberPointTimeoutException;
 import com.todongsan.marketservice.market.client.exception.MemberPointUnavailableException;
@@ -20,7 +21,6 @@ public class PredictionSpendReconciliationService {
 
     private static final int PENDING_STALE_MINUTES = 3;
     private static final String TRANSACTION_FAILED = "TRANSACTION_FAILED";
-    private static final String POINT_TRANSACTION_NOT_FOUND = "POINT_TRANSACTION_NOT_FOUND";
     private static final String MEMBER_POINT_RESULT_UNKNOWN = "MEMBER_POINT_RESULT_UNKNOWN";
 
     private final MarketPredictionTransactionService transactionService;
@@ -49,6 +49,11 @@ public class PredictionSpendReconciliationService {
         MemberPointTransactionStatusResponse response;
         try {
             response = memberPointClient.getTransactionStatus(prediction.getPointSpendIdempotencyKey());
+            if (response != null && response.status() == MemberPointTransactionStatus.NOT_FOUND) {
+                counts.notFoundCount++;
+                // 바로 FAILED로 종결하면 늦게 도착한 spend가 차감만 남긴다. MP에 실패를 먼저 확정한다 (ASYNC_POINT_FLOW.md §12.6)
+                response = memberPointClient.fenceSpend(spendCommand(prediction));
+            }
         } catch (MemberPointTimeoutException | MemberPointUnavailableException | MemberPointExternalException e) {
             markUnknown(prediction.getId(), failureReason(e, MEMBER_POINT_RESULT_UNKNOWN), counts);
             return;
@@ -74,17 +79,19 @@ public class PredictionSpendReconciliationService {
             }
             return;
         }
-        if (status == MemberPointTransactionStatus.NOT_FOUND) {
-            counts.notFoundCount++;
-            if (transactionService.failPredictionForReconciliation(prediction.getId(), POINT_TRANSACTION_NOT_FOUND)) {
-                counts.failedCount++;
-            } else {
-                counts.skippedCount++;
-            }
-            return;
-        }
-
         markUnknown(prediction.getId(), MEMBER_POINT_RESULT_UNKNOWN, counts);
+    }
+
+    /** 원래 spend와 같은 요청 내용이어야 MP request_hash가 일치한다 (MarketPredictionService.createPrediction). */
+    private static PointSpendCommand spendCommand(MarketPrediction prediction) {
+        return new PointSpendCommand(
+                prediction.getMemberId(),
+                MarketPredictionService.SPEND_TYPE,
+                prediction.getPointAmount(),
+                MarketPredictionService.REFERENCE_TYPE,
+                prediction.getId(),
+                prediction.getPointSpendIdempotencyKey()
+        );
     }
 
     private void markUnknown(long predictionId, String failReason, ReconcileCounts counts) {

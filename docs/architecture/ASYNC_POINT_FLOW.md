@@ -377,7 +377,7 @@ CREATE TABLE market_outbox_event (          -- member-point: point_outbox_event
 
 - INSERT만 한다. UPDATE하지 않는다.
 - 비즈니스 데이터(detail / point_history)와 **같은 트랜잭션**에서 INSERT한다.
-- Debezium은 binlog의 INSERT만 발행하므로 발행 후 row를 삭제해도 된다. 추적을 위해 일정 기간 보존 후 주기적으로 삭제한다(기간은 미정).
+- Debezium은 binlog의 INSERT만 발행하므로 발행 후 row를 삭제해도 된다. 추적을 위해 7일 보존 후 주기적으로 삭제한다 (§6.1 R7).
 
 ---
 

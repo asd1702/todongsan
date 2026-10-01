@@ -4,6 +4,7 @@ import com.todongsan.memberpointservice.global.response.ApiResponse;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
@@ -38,6 +39,12 @@ public class GlobalExceptionHandler {
     // 필수 쿼리 파라미터 누락
     @ExceptionHandler(MissingServletRequestParameterException.class)
     public ResponseEntity<ApiResponse<Void>> handleMissingParameterException(MissingServletRequestParameterException e) {
+        return response(ErrorCode.INVALID_REQUEST);
+    }
+
+    // 요청 본문(JSON)을 읽을 수 없음 (ERROR_POLICY.md 2-1)
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<ApiResponse<Void>> handleNotReadableException(HttpMessageNotReadableException e) {
         return response(ErrorCode.INVALID_REQUEST);
     }
 

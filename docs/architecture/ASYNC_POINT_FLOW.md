@@ -25,6 +25,8 @@ Feign으로 동기 호출한다. 관리자 요청이 배치 처리 완료까지 
 | 무효 처리 → 참여자 환불 | **비동기 전환** | 관리자·사용자 모두 결과를 기다릴 필요가 없는 후속 처리 |
 | 정산 → 승자 지급 | **비동기 전환** | 위와 동일 |
 
+네 흐름 모두 Market이 오케스트레이터인 Saga다. 동기/비동기는 통신 방식의 차이일 뿐이다 (§12).
+
 ---
 
 ## 3. 결정 사항
@@ -312,6 +314,7 @@ CREATE TABLE market_outbox_event (          -- member-point: point_outbox_event
 - [ ] 정체 감지 기준 시간과 방식
 - [ ] outbox row 보존 기간과 삭제 주기
 - [ ] CI 스키마 호환성 검사 (Schema Registry, E3)
+- [ ] 늦게 도착한 spend 보상: 재확인 기간, 보상 eventType, prediction 상태 (§12.6)
 
 ---
 
@@ -324,6 +327,110 @@ CREATE TABLE market_outbox_event (          -- member-point: point_outbox_event
 | 3 | **환불 결과 방향**: MP outbox, 결과 이벤트, Market consumer 완료 판정 | 무효 → `VOIDED` 자동 완료, MP 중단·재기동 후에도 유실 없음 |
 | 4 | **정산 적용**: 2~3 구조를 정산에 적용 | 정산 → `SETTLED`, 기존 정산 테스트 통과 |
 | 5 | 정리: 정체 감지, DLQ, 실험 수행 및 결과 기록 | 전체 테스트, 실험 결과 문서화 |
+| 6 | (선택) **늦게 도착한 spend 보상** (§12.6): 문서 갱신 후 보상 환불 이벤트 구현 | `NOT_FOUND`→`FAILED` 이후 spend가 처리되어도 보상 환불로 잔액 복구 |
 
 환불을 먼저 하는 이유: 원금 반환이라 금액 계산이 없고, 정산은 배당 계산·잔여 소각·reputation task 생성이 얽혀 있다.
 item 단위 처리 구조는 동일하므로 환불로 파이프라인을 검증한 뒤 정산에 적용한다.
+
+---
+
+## 12. Saga 구조
+
+Market ↔ Member-Point 포인트 흐름은 모두 **Market이 오케스트레이터인 Saga**다.
+Saga 프레임워크(Axon, Eventuate Tram, Temporal 등)는 도입하지 않는다. Saga 상태는 이미 도메인 테이블(`market_prediction.status`, 환불/정산 detail)에 있고, 전달·재시도는 outbox + CDC + Kafka가 담당한다.
+
+### 12.1 두 가지 독립된 결정
+
+| 결정 | 기준 | 질문 |
+|---|---|---|
+| 통신 방식 (동기 / 비동기) | 호출자가 결과를 **그 자리에서** 알아야 하는가 | 사용자 응답이 결과에 따라 달라지는가 |
+| Saga 방식 (오케스트레이션 / 코레오그래피) | **누가 비즈니스 규칙과 완료 판단을 가지는가** | 대상·금액을 누가 정하고, 끝났는지를 누가 아는가 |
+
+통신이 비동기라고 코레오그래피가 되는 것은 아니다. 명령 메시지와 결과 메시지를 주고받는 **비동기 오케스트레이션**이 가능하다.
+
+| 흐름 | 결과를 바로 알아야 하나 | 통신 | 규칙·완료 판단 | Saga |
+|---|---|---|---|---|
+| 예측 참여 (`spend`) | 예. 잔액 부족을 즉시 거절 | 동기 (Feign) | Market | **동기 오케스트레이션** |
+| 무효 환불 | 아니요 | 비동기 (outbox + CDC) | Market | **비동기 오케스트레이션** |
+| 정산 지급 | 아니요 | 비동기 (outbox + CDC) | Market | **비동기 오케스트레이션** |
+
+`MARKET_REFUND_REQUESTED`는 대상 회원·금액·멱등성 키를 Market이 정해 보내는 **명령**이고, 완료 판단도 Market이 detail로 한다. 따라서 Kafka를 써도 구조는 오케스트레이션이다.
+
+### 12.2 분기점(pivot)과 복구 전략
+
+Saga의 각 단계는 다음 셋 중 하나다.
+
+| 성격 | 의미 | 실패 시 |
+|---|---|---|
+| 보상 가능 (compensatable) | 되돌릴 수 있는 단계 | 보상 트랜잭션으로 되돌린다 (backward recovery) |
+| **분기점 (pivot)** | 성공하면 되돌리지 않기로 정한 단계 | 이전 실패 → 보상, 이후 실패 → 재시도 |
+| 재시도 (retriable) | 반드시 끝까지 완료시키는 단계 | 성공할 때까지 재시도한다 (forward recovery) |
+
+**중간에 실패했다고 보상 트랜잭션이 항상 발동하지는 않는다.** 분기점 이전 실패는 보상, 분기점 이후 실패는 재시도로 완료한다.
+
+### 12.3 예측 참여 — 동기 오케스트레이션
+
+```text
+T1 [Market TX]  market_prediction 저장 (POINT_PENDING)            보상 가능
+T2 [MP]         POST /internal/api/v1/points/spend (Idempotency-Key)  ← 분기점
+T3 [Market TX]  Market + 모든 option row lock, 가격 확정 (CONFIRMED)    재시도
+```
+
+| 실패 지점 | 커밋된 것 | 처리 | 복구 |
+|---|---|---|---|
+| T2 실패 (잔액 부족 등) | T1 | prediction → `FAILED` | T1 보상 (상태 변경) |
+| T2 결과 불명 (timeout 등) | T1, T2는 불명 | prediction → `POINT_UNKNOWN`, 대사 스케줄러가 `GET /points/transactions`로 확인 | 판단 보류 후 결정 |
+| T2 성공 후 T3 실패 | T1, T2 | prediction `POINT_PENDING` 유지, 대사가 `PROCESSED` 확인 후 T3 재시도 | **forward recovery** |
+
+차감까지 성공한 사용자의 예측은 살린다는 정책이다 (`docs/market/MARKET_FAILURE_SCENARIO.md`: "포인트 차감은 성공했지만 가격 확정 트랜잭션에서 실패할 수 있다. 이 경우 Prediction을 FAILED로 단정하지 않는다").
+
+forward recovery가 성립하도록 **상태 잠금(fencing)**을 둔다.
+`POINT_PENDING` / `POINT_UNKNOWN` prediction이 남아 있으면 결과 확정(`CLOSED` 전환)과 무효 처리가 거부된다.
+따라서 T3을 더 이상 확정할 수 없는 상태로 Market이 넘어가지 않는다. 대사의 T3 재시도는 `ACTIVE`, `DATA_PENDING` Market에서 허용한다.
+
+### 12.4 환불·정산 — 비동기 오케스트레이션
+
+```text
+T1 [Market TX]  detail PENDING × N + market_outbox_event × N (명령)
+T2 [MP TX]      point_history + 잔액 증가 + point_outbox_event (결과)      재시도
+T3 [Market TX]  detail SUCCESS / FAILED, 전부 SUCCESS면 완료               재시도
+```
+
+| 실패 지점 | 처리 |
+|---|---|
+| T2 일시 장애 | consumer 재시도 → DLT (§6). outbox와 멱등성 키로 유실·중복 없음 |
+| T2 영구 실패 (`MEMBER_NOT_FOUND` 등) | `POINT_CREDIT_FAILED` 결과 → detail `FAILED`, 관리자 처리 |
+| T3 실패 | 결과 이벤트 재전달로 재시도 (Market 반영은 멱등) |
+
+적립(+) 한 방향이라 되돌릴 대상이 없으므로 보상 트랜잭션은 없다. T3(결과 방향)은 3단계에서 구현한다.
+
+### 12.5 코레오그래피를 쓰지 않는 이유와 적용 대상
+
+Market ↔ MP를 코레오그래피로 바꾸면 Market은 "마켓 42 무효" 같은 **사실**만 발행하고, 누구에게 얼마를 환불할지 MP가 판단해야 한다.
+MP가 Market의 prediction 데이터를 알아야 하므로 서비스 경계가 무너지고, 환불이 끝났는지 아는 주체도 사라진다.
+
+코레오그래피는 **사실을 알리고 끝나는 흐름**에 쓴다. 발행자는 결과에 관심이 없고, 여러 구독자가 각자 반응한다.
+
+| 후보 | 이유 |
+|---|---|
+| 정산 완료 → Insight 신뢰도 업데이트 | Market은 결과를 기다리지 않는다. 현재 `market_reputation_update` polling을 이벤트 구독으로 대체 가능 |
+| 정산·무효 → 알림, 분석 (향후) | 구독자를 추가해도 Market 변경이 필요 없다 |
+
+### 12.6 남은 보상 지점: 늦게 도착한 spend
+
+대사에서 MP 거래가 `NOT_FOUND`면 prediction을 즉시 `FAILED`(종결)로 바꾼다 (`PredictionSpendReconciliationService`).
+
+```text
+spend 요청 timeout → POINT_UNKNOWN
+→ 3분 뒤 대사: MP 기록 없음(NOT_FOUND) → FAILED (종결)
+→ 지연된 spend가 MP에서 처리됨 → 포인트만 차감되고 prediction은 없음
+```
+
+`FAILED` 이후 다시 확인하는 경로가 없어 차감이 남는다. 발생 빈도는 낮지만 사용자 포인트가 사라지는 방향의 오류다.
+이 경우는 분기점(T2)이 Saga 종결 이후에 성공한 것이므로 **backward recovery(보상)**가 맞다.
+
+보상 방안 (미구현, §11 6단계):
+
+1. `NOT_FOUND`로 `FAILED` 처리한 prediction을 일정 기간 동안 다시 조회한다.
+2. 나중에 `PROCESSED`가 확인되면 보상 환불 이벤트를 `market.point-requests`로 발행한다 (기존 파이프라인 재사용).
+3. 새 `eventType`과 prediction 상태가 필요하므로 `MARKET_FAILURE_SCENARIO.md`, `MARKET_ERD.md`, 이벤트 스키마를 먼저 갱신한다 (Market `AGENTS.md`: 문서에 없는 상태·ErrorCode 추가 금지).

@@ -6,6 +6,8 @@ import com.todongsan.marketservice.market.type.TransactionItemStatus;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -39,15 +41,23 @@ public class PointResultBatchApplier {
     /** 건 단위 경로의 updateRetrySettlementDetailStatus 조건과 같다. SUCCESS는 종결 상태다. */
     private static final Set<TransactionItemStatus> UPDATABLE_DETAIL_STATUSES =
             Set.of(TransactionItemStatus.FAILED, TransactionItemStatus.UNKNOWN, TransactionItemStatus.PENDING);
-    private static final String UPDATE_DETAIL_SQL = """
+    private static final String FAIL_DETAIL_SQL = """
             UPDATE market_settlement_detail
-            SET status = ?, fail_reason = ?, updated_at = ?
+            SET status = 'FAILED', fail_reason = ?, updated_at = ?
             WHERE id = ? AND status IN ('FAILED', 'UNKNOWN', 'PENDING')
             """;
-    private static final String SETTLE_PREDICTION_SQL = """
-            UPDATE market_prediction
-            SET status = 'SETTLED', settled_amount = ?, updated_at = ?
-            WHERE id = ? AND status = 'CONFIRMED'
+    /** 성공은 모두 같은 값이라 IN 한 문장으로 쓴다. 상태 조건은 건 단위 경로와 같다 (안전장치). */
+    private static final String SUCCEED_DETAILS_SQL = """
+            UPDATE market_settlement_detail
+            SET status = 'SUCCESS', fail_reason = NULL, updated_at = ?
+            WHERE status IN ('FAILED', 'UNKNOWN', 'PENDING') AND id IN (%s)
+            """;
+    /** 지급액은 예측마다 달라 값 목록(VALUES ROW, MySQL 8.0.19+)과 JOIN해 한 문장으로 쓴다. */
+    private static final String SETTLE_PREDICTIONS_SQL = """
+            UPDATE market_prediction p
+            JOIN (VALUES %s) AS v (id, settled_amount) ON p.id = v.id
+            SET p.status = 'SETTLED', p.settled_amount = v.settled_amount, p.updated_at = ?
+            WHERE p.status = 'CONFIRMED'
             """;
 
     private final MarketMapper marketMapper;
@@ -65,8 +75,7 @@ public class PointResultBatchApplier {
         Set<Long> lockedMarketIds = new HashSet<>(marketMapper.lockMarketsByIdsInOrder(marketIds));
         Map<String, MarketSettlementDetail> settlementDetails = lockSettlementDetails(items, lockedMarketIds);
         Timestamp now = Timestamp.valueOf(LocalDateTime.now());
-        List<Object[]> detailUpdates = new ArrayList<>();
-        List<Object[]> predictionUpdates = new ArrayList<>();
+        Map<Long, MarketSettlementDetail> changedDetails = new LinkedHashMap<>();
 
         List<PointResultApplyOutcome> outcomes = new ArrayList<>(items.size());
         Set<Long> voidIds = new LinkedHashSet<>();
@@ -80,7 +89,7 @@ public class PointResultBatchApplier {
                 case MARKET_REFUND_REQUESTED -> refundTransactionService.applyRefundResultItem(
                         item.idempotencyKey(), item.credited(), item.errorCode());
                 case MARKET_SETTLEMENT_PAYOUT_REQUESTED -> applySettlement(
-                        item, settlementDetails.get(item.idempotencyKey()), now, detailUpdates, predictionUpdates);
+                        item, settlementDetails.get(item.idempotencyKey()), changedDetails);
                 default -> throw new IllegalArgumentException("Unsupported requestEventType=" + item.requestEventType());
             };
             if (applied.parentId() != null) {
@@ -94,12 +103,7 @@ public class PointResultBatchApplier {
         }
 
         // 완료 판정이 반영된 상태를 세도록 먼저 기록한다
-        if (!detailUpdates.isEmpty()) {
-            jdbcTemplate.batchUpdate(UPDATE_DETAIL_SQL, detailUpdates);
-        }
-        if (!predictionUpdates.isEmpty()) {
-            jdbcTemplate.batchUpdate(SETTLE_PREDICTION_SQL, predictionUpdates);
-        }
+        writeSettlementResults(changedDetails.values(), now);
         voidIds.forEach(refundTransactionService::completeRefundIfDone);
         marketIdBySettlementId.forEach((settlementId, marketId) ->
                 settlementTransactionService.completeSettlementIfDone(marketId, settlementId));
@@ -121,24 +125,61 @@ public class PointResultBatchApplier {
         return details;
     }
 
-    /** 건 단위 경로와 같은 규칙을 잠근 상태에 적용한다. 같은 키가 배치에 여러 번 오면 앞 건의 결과 상태를 이어받는다. */
-    private static AppliedPointResult applySettlement(Item item, MarketSettlementDetail detail, Timestamp now,
-                                                      List<Object[]> detailUpdates, List<Object[]> predictionUpdates) {
+    /**
+     * 건 단위 경로와 같은 규칙을 잠근 상태에 적용한다. 같은 키가 배치에 여러 번 오면 앞 건의 결과 상태를 이어받는다.
+     * DB에는 쓰지 않고 바뀐 detail만 모은다. 잠금을 잡고 있으므로 detail마다 최종 상태 한 번만 쓰면 건 단위 결과와 같다.
+     */
+    private static AppliedPointResult applySettlement(Item item, MarketSettlementDetail detail,
+                                                      Map<Long, MarketSettlementDetail> changedDetails) {
         if (detail == null) {
             return AppliedPointResult.detailNotFound();
         }
         if (!UPDATABLE_DETAIL_STATUSES.contains(detail.getStatus())) {
             return new AppliedPointResult(PointResultApplyOutcome.SKIPPED, detail.getSettlementId());
         }
-        TransactionItemStatus next = item.credited() ? TransactionItemStatus.SUCCESS : TransactionItemStatus.FAILED;
-        String failReason = item.credited()
-                ? null
-                : MarketSettlementTransactionService.failureReason(item.errorCode(), "MEMBER_POINT_FAILED");
-        detailUpdates.add(new Object[]{next.name(), failReason, now, detail.getId()});
-        detail.setStatus(next);
         if (item.credited()) {
-            predictionUpdates.add(new Object[]{detail.getSettledAmount(), now, detail.getPredictionId()});
+            detail.setStatus(TransactionItemStatus.SUCCESS);
+            detail.setFailReason(null);
+        } else {
+            detail.setStatus(TransactionItemStatus.FAILED);
+            detail.setFailReason(MarketSettlementTransactionService.failureReason(item.errorCode(), "MEMBER_POINT_FAILED"));
         }
+        changedDetails.put(detail.getId(), detail);
         return new AppliedPointResult(PointResultApplyOutcome.APPLIED, detail.getSettlementId());
+    }
+
+    /** 성공 detail은 IN 한 문장, 지급액은 VALUES JOIN 한 문장, 드문 실패는 건별로 쓴다 (§17.6). 성공한 detail만 예측을 정산한다. */
+    private void writeSettlementResults(Collection<MarketSettlementDetail> details, Timestamp now) {
+        List<MarketSettlementDetail> succeeded = details.stream()
+                .filter(detail -> detail.getStatus() == TransactionItemStatus.SUCCESS)
+                .toList();
+        List<Object[]> failed = details.stream()
+                .filter(detail -> detail.getStatus() == TransactionItemStatus.FAILED)
+                .map(detail -> new Object[]{detail.getFailReason(), now, detail.getId()})
+                .toList();
+        if (!failed.isEmpty()) {
+            jdbcTemplate.batchUpdate(FAIL_DETAIL_SQL, failed);
+        }
+        if (succeeded.isEmpty()) {
+            return;
+        }
+
+        List<Object> detailArgs = new ArrayList<>(succeeded.size() + 1);
+        detailArgs.add(now);
+        succeeded.forEach(detail -> detailArgs.add(detail.getId()));
+        jdbcTemplate.update(SUCCEED_DETAILS_SQL.formatted(placeholders(succeeded.size(), "?")), detailArgs.toArray());
+
+        List<Object> predictionArgs = new ArrayList<>(succeeded.size() * 2 + 1);
+        succeeded.forEach(detail -> {
+            predictionArgs.add(detail.getPredictionId());
+            predictionArgs.add(detail.getSettledAmount());
+        });
+        predictionArgs.add(now);
+        jdbcTemplate.update(SETTLE_PREDICTIONS_SQL.formatted(placeholders(succeeded.size(), "ROW(?, ?)")),
+                predictionArgs.toArray());
+    }
+
+    private static String placeholders(int count, String placeholder) {
+        return String.join(", ", Collections.nCopies(count, placeholder));
     }
 }

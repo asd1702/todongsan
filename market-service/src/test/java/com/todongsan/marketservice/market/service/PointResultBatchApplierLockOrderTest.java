@@ -3,7 +3,6 @@ package com.todongsan.marketservice.market.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.times;
@@ -58,7 +57,7 @@ class PointResultBatchApplierLockOrderTest {
         order.verify(marketMapper).lockMarketsByIdsInOrder(List.of(42L, 77L));
         order.verify(marketMapper).lockSettlementDetailsByIdempotencyKeys(List.of("S-77"));
         order.verify(refundTransactionService).applyRefundResultItem("R-42", true, null);
-        order.verify(jdbcTemplate, times(2)).batchUpdate(anyString(), anyList());
+        order.verify(jdbcTemplate, times(2)).update(anyString(), any(Object[].class)); // 성공 detail IN 1문장 + 지급액 VALUES JOIN 1문장
         order.verify(refundTransactionService).completeRefundIfDone(500L);
         order.verify(settlementTransactionService).completeSettlementIfDone(77L, 600L);
     }

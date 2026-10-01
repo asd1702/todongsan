@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -25,6 +26,7 @@ import org.springframework.web.context.WebApplicationContext;
 
 /** 결과 배치 반영 (ASYNC_POINT_FLOW.md §16.1). 환불 마켓 100과 정산 마켓 200의 결과를 한 배치로 반영한다. */
 @SpringBootTest(properties = "market.point-transport.mode=async")
+@ActiveProfiles("mysqlit")
 class PointResultBatchApplierTest {
 
     private static final String REFUND = PointResultBatchApplier.MARKET_REFUND_REQUESTED;

@@ -992,3 +992,15 @@ MP 배치 뒤 병목이 Market 결과 반영으로 옮겨갔다 (⑩: MP 완료 
 | 환불 | 건수가 적어 건 단위 그대로. 정산과 다른 테이블이라 한 배치에 섞여도 정합성에 영향 없음 |
 
 정확성: `PointResultBatchEquivalenceTest`가 같은 조건의 두 정산 마켓에 같은 결과 순서(성공, 실패→성공, 성공 뒤 늦은 실패, 중복, 없는 키, 완료)를 건 단위·묶음으로 각각 반영해 결과와 DB 상태를 비교한다. 배치 안 상태 이어받기 제거, 예측 갱신 제거 두 변형을 모두 잡아내는 것을 확인했다.
+
+**한 문장 UPDATE (결과 ⑫).** JDBC batch는 왕복을 줄이지만 UPDATE는 합쳐지지 않아 DB가 문장을 하나씩 실행한다 (배치당 UPDATE 200개). 그래서 정산 결과를 한 문장으로 쓴다.
+
+| 대상 | 방법 |
+|---|---|
+| 성공 detail | `UPDATE ... SET status='SUCCESS', fail_reason=NULL ... WHERE status IN (...) AND id IN (...)` 한 문장 (모두 같은 값) |
+| 예측 지급액 | 값 목록과 JOIN: `UPDATE market_prediction p JOIN (VALUES ROW(?, ?), ...) AS v (id, settled_amount) ON p.id = v.id SET ... WHERE p.status = 'CONFIRMED'` (MySQL 8.0.19+) |
+| 실패 detail | 드물고 사유가 달라 건별 |
+
+잠금을 잡고 있으므로 detail마다 **최종 상태만 한 번** 쓴다 (배치 안 실패 → 성공은 성공 한 번). 상태 조건은 건 단위와 같게 둔다.
+`VALUES ROW` JOIN은 H2가 지원하지 않으므로 묶음 반영 테스트(`PointResultBatchApplierTest`, `PointResultBatchEquivalenceTest`)는 기존 MySQL 통합 테스트 환경(`mysqlit` 프로필, `market-mysql-it` 컨테이너)에서 돈다. 동등성 테스트는 배치 두 개로 나눠 배치 사이 상태 변화(이전 배치의 실패 → 다음 배치의 성공, 실패 사유 삭제)까지 비교한다.
+참고: jOOQ "row-by-row / batch / bulk" 비교, 카카오페이 Spring Batch 성능 팁(같은 값은 IN, 다른 값은 batch), MySQL 8.0 bulk update 벤치마크(JOIN > CASE >>> 문장 여러 개).

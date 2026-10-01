@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -30,6 +31,7 @@ import org.springframework.web.context.WebApplicationContext;
  * 같은 조건의 정산 마켓 두 개에 같은 결과 순서를 각각 건 단위(마켓 300)와 배치(마켓 400)로 반영해 비교한다.
  */
 @SpringBootTest(properties = "market.point-transport.mode=async")
+@ActiveProfiles("mysqlit")
 class PointResultBatchEquivalenceTest {
 
     private static final String SETTLEMENT = PointResultBatchApplier.MARKET_SETTLEMENT_PAYOUT_REQUESTED;
@@ -70,24 +72,31 @@ class PointResultBatchEquivalenceTest {
     @Test
     void 정산_결과의_묶음_반영은_건_단위_반영과_같다() {
         List<PointResultApplyOutcome> recordOutcomes = new ArrayList<>();
-        for (Item item : scenario(RECORD_MARKET)) {
-            recordOutcomes.add(settlementTransactionService.applyAsyncSettlementResult(
-                    item.marketId(), item.idempotencyKey(), item.credited(), item.errorCode()));
+        List<PointResultApplyOutcome> batchOutcomes = new ArrayList<>();
+        for (int batch = 0; batch < 2; batch++) {
+            for (Item item : scenario(RECORD_MARKET).get(batch)) {
+                recordOutcomes.add(settlementTransactionService.applyAsyncSettlementResult(
+                        item.marketId(), item.idempotencyKey(), item.credited(), item.errorCode()));
+            }
+            batchOutcomes.addAll(batchApplier.applyBatch(scenario(BATCH_MARKET).get(batch)));
+            // 배치 사이 중간 상태도 같아야 한다 (첫 배치 뒤: 2번은 FAILED + 실패 사유)
+            assertThat(state(BATCH_MARKET)).containsExactlyElementsOf(state(RECORD_MARKET));
         }
-        List<PointResultApplyOutcome> batchOutcomes = batchApplier.applyBatch(scenario(BATCH_MARKET));
 
         assertThat(batchOutcomes).containsExactlyElementsOf(recordOutcomes);
         assertThat(batchOutcomes).containsExactly(
+                // 배치 1
                 PointResultApplyOutcome.APPLIED,           // 1 성공
                 PointResultApplyOutcome.APPLIED,           // 2 실패
-                PointResultApplyOutcome.APPLIED,           // 2 실패 → 성공
-                PointResultApplyOutcome.APPLIED,           // 3 성공
-                PointResultApplyOutcome.SKIPPED,           // 3 성공 뒤 늦은 실패
+                PointResultApplyOutcome.APPLIED,           // 3 실패
+                PointResultApplyOutcome.APPLIED,           // 3 실패 → 성공 (배치 안)
+                // 배치 2
+                PointResultApplyOutcome.APPLIED,           // 2 실패 → 성공 (배치 사이, 실패 사유가 지워져야 함)
+                PointResultApplyOutcome.SKIPPED,           // 1 성공 뒤 늦은 실패
                 PointResultApplyOutcome.SKIPPED,           // 1 중복 성공
                 PointResultApplyOutcome.DETAIL_NOT_FOUND,  // 없는 키
                 PointResultApplyOutcome.APPLIED            // 4 성공 → 정산 완료
         );
-        assertThat(state(BATCH_MARKET)).containsExactlyElementsOf(state(RECORD_MARKET));
         assertThat(queryString("SELECT status FROM market WHERE id = " + BATCH_MARKET)).isEqualTo("SETTLED");
     }
 
@@ -106,16 +115,21 @@ class PointResultBatchEquivalenceTest {
                 .andExpect(jsonPath("$.data.settlementStatus").value("IN_PROGRESS"));
     }
 
-    private static List<Item> scenario(long marketId) {
+    private static List<List<Item>> scenario(long marketId) {
         return List.of(
-                credited(marketId, 1),
-                failed(marketId, 2),
-                credited(marketId, 2),
-                credited(marketId, 3),
-                failed(marketId, 3),
-                credited(marketId, 1),
-                new Item(SETTLEMENT, marketId, key(marketId, 9), true, null),
-                credited(marketId, 4)
+                List.of(
+                        credited(marketId, 1),
+                        failed(marketId, 2),
+                        failed(marketId, 3),
+                        credited(marketId, 3)
+                ),
+                List.of(
+                        credited(marketId, 2),
+                        failed(marketId, 1),
+                        credited(marketId, 1),
+                        new Item(SETTLEMENT, marketId, key(marketId, 9), true, null),
+                        credited(marketId, 4)
+                )
         );
     }
 

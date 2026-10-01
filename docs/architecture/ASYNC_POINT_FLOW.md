@@ -1040,3 +1040,26 @@ jbd2 저널은 Docker VM 안 모든 컨테이너가 공유하므로 다른 쓰�
 
 **운영 관점**: 같은 구조(작은 redo + 지연이 튀는 디스크)면 운영에서도 생길 수 있다. RDS는 기본 2GB라 빈도·크기가 훨씬 작고, Aurora는 로컬 redo 파일이 없어 이 경로가 없다.
 EC2 등에 직접 설치할 때는 redo 용량을 피크 쓰기량에 맞추고(통상 약 1시간 분량), DB는 전용 볼륨에 둔다. 앱의 풀 분리(§17.7)는 어떤 원인의 DB 지연이든 증폭을 막으므로 그대로 둔다.
+
+### 17.9 MP 잔액 UPDATE 한 문장 (구현)
+
+적립 배치의 회원별 잔액 UPDATE(배치 100건이면 문장 약 100개, 1만 명이면 1만 문장)를 Market(§17.6)과 같이 값 목록 JOIN 한 문장으로 바꿨다.
+
+```sql
+UPDATE member m
+JOIN (VALUES ROW(?, ?), ROW(?, ?), ...) AS v (id, amount) ON m.id = v.id
+SET m.point_balance = m.point_balance + v.amount
+```
+
+- 회원별 합계는 기존과 같이 앱에서 받은 순서대로 누적하고(이력마다 처리 후 잔액 계산), DB에는 회원당 1행을 상대값(+)으로 더한다 (§17.4 M5).
+- `VALUES ROW` JOIN은 H2 미지원이라 MP에도 MySQL 통합 테스트 환경을 추가했다: `infra/docker-compose.test.yml`의 `member-point-mysql-it`(13307, tmpfs, Flyway로 스키마 생성), 테스트 프로필 `mysqlit`.
+  적립 배치를 직접 호출하는 `MarketPointCreditBatchEquivalenceTest`, `ConsumerDatabaseBulkheadTest`가 이 환경에서 돈다.
+- 변형 검사: 상대값을 덮어쓰기로 바꾼 경우, 같은 회원 합산을 빼먹은 경우 모두 동등성 테스트가 잡아낸다.
+- 성능 측정은 배치 크기·병렬도 비교(§17.10 예정)와 함께 한다.
+
+### 17.10 MP 배치 크기·병렬도 (측정, 결과 ⑮)
+
+배치 50~500, 병렬도 3~12를 비교했다. ② MP 완료는 배치·병렬도를 키울수록 빨라지지만(최소 약 4.5초), **③ Market 완료는 9.4~10.2초로 변하지 않는다.**
+병렬도를 올리면 spend p95가 커진다(병렬도 12에서 안전선 초과). 따라서 **배치 100, 병렬도 3을 유지**한다.
+정산 전체 시간을 줄이려면 다음 대상은 Market 결과 반영(결과 key `market_id`라 한 마켓 = thread 1개)과 CDC 구간이다.
+측정 도구: `scripts/bench/settlement/sweep.sh` (MP 전용 인자는 `apps.sh`의 `MP_APP_ARGS`).

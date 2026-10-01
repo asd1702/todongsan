@@ -10,10 +10,10 @@ import com.todongsan.memberpointservice.point.event.MarketPointCreditBatchApplie
 import com.todongsan.memberpointservice.point.event.MarketPointRequestEvent;
 import com.todongsan.memberpointservice.point.service.PointInternalService;
 import com.zaxxer.hikari.HikariDataSource;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
@@ -30,27 +30,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 적립 consumer와 API(spend)는 서로 다른 커넥션 풀을 쓴다 (벌크헤드, ASYNC_POINT_FLOW.md §17.7).
  * 한쪽 풀이 바닥나도 다른 쪽은 처리된다. 풀을 기다리면 1초 안에 실패하도록 connection-timeout을 줄인다.
+ * 적립 배치가 MySQL 전용 문법을 쓰므로 MySQL 통합 테스트 환경에서 돈다 (§17.9).
  */
 @SpringBootTest(properties = {
         "spring.datasource.hikari.connection-timeout=1000",
         "member-point.kafka.market-point-requests.pool-size=2"
 })
+@ActiveProfiles("mysqlit")
 class ConsumerDatabaseBulkheadTest {
 
     private static final AtomicLong SEQ = new AtomicLong(System.nanoTime() % 1_000_000);
-    private static final String CREATE_OUTBOX = """
-            CREATE TABLE IF NOT EXISTS point_outbox_event (
-                id BIGINT NOT NULL AUTO_INCREMENT,
-                event_id CHAR(36) NOT NULL,
-                aggregate_type VARCHAR(50) NOT NULL,
-                aggregate_id VARCHAR(50) NOT NULL,
-                event_type VARCHAR(80) NOT NULL,
-                payload CLOB NOT NULL,
-                created_at DATETIME(3) NOT NULL,
-                PRIMARY KEY (id),
-                UNIQUE (event_id)
-            )
-            """;
 
     @Autowired DataSource apiDataSource;
     @Autowired ConsumerDatabase consumerDatabase;
@@ -59,11 +48,6 @@ class ConsumerDatabaseBulkheadTest {
     @Autowired MemberRepository memberRepository;
     @Autowired JdbcTemplate jdbcTemplate;
     @Autowired ObjectMapper objectMapper;
-
-    @BeforeEach
-    void setUp() {
-        jdbcTemplate.execute(CREATE_OUTBOX);
-    }
 
     @Test
     void consumer_풀은_API_풀과_별개이고_크기가_설정을_따른다() {

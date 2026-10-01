@@ -1,0 +1,17 @@
+# MySQL 통합 테스트 프로필. infra/docker-compose.test.yml의 member-point-mysql-it(13307, 버리는 DB)을 쓴다.
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.test.yml up -d member-point-mysql-it
+# 스키마는 운영과 같이 Flyway가 만든다. MySQL 전용 SQL(VALUES ROW JOIN 등)을 검증한다 (ASYNC_POINT_FLOW.md §17.9)
+spring:
+  flyway:
+    enabled: true
+  datasource:
+    url: ${MEMBERPOINT_IT_DB_URL:jdbc:mysql://localhost:13307/memberpoint_test?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Seoul}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: ${MEMBERPOINT_IT_DB_USERNAME:memberpoint_test_user}
+    password: ${MEMBERPOINT_IT_DB_PASSWORD:memberpoint-test-local-password}
+    hikari:
+      data-source-properties:
+        rewriteBatchedStatements: true
+  jpa:
+    hibernate:
+      ddl-auto: validate

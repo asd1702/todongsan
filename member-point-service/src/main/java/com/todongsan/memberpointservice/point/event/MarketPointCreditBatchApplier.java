@@ -18,6 +18,7 @@ import java.math.RoundingMode;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -43,7 +44,15 @@ public class MarketPointCreditBatchApplier {
                                        idempotency_key, request_hash, status, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
-    private static final String UPDATE_BALANCE_SQL = "UPDATE member SET point_balance = point_balance + ? WHERE id = ?";
+    /**
+     * 회원별 적립 합계를 값 목록(VALUES ROW, MySQL 8.0.19+)과 JOIN해 한 문장으로 더한다 (§17.9).
+     * 상대값(+)이라 잠금이 빠지는 실수가 있어도 잔액 자체는 틀리지 않는다 (§17.4 M5).
+     */
+    private static final String ADD_BALANCES_SQL = """
+            UPDATE member m
+            JOIN (VALUES %s) AS v (id, amount) ON m.id = v.id
+            SET m.point_balance = m.point_balance + v.amount
+            """;
 
     private final ConsumerDatabase consumerDatabase;
     private final PointResultOutboxWriter pointResultOutboxWriter;
@@ -106,9 +115,13 @@ public class MarketPointCreditBatchApplier {
         }
 
         if (!increments.isEmpty()) {
-            jdbcTemplate.batchUpdate(UPDATE_BALANCE_SQL, increments.entrySet().stream()
-                    .map(e -> new Object[]{e.getValue(), e.getKey()})
-                    .toList());
+            List<Object> args = new ArrayList<>(increments.size() * 2);
+            increments.forEach((memberId, amount) -> {
+                args.add(memberId);
+                args.add(amount);
+            });
+            jdbcTemplate.update(ADD_BALANCES_SQL.formatted(
+                    String.join(", ", Collections.nCopies(increments.size(), "ROW(?, ?)"))), args.toArray());
             jdbcTemplate.batchUpdate(INSERT_HISTORY_SQL, histories);
         }
         pointResultOutboxWriter.appendAll(jdbcTemplate, items.stream().map(Item::event).toList(), results);

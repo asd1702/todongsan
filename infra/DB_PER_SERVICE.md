@@ -37,6 +37,12 @@ docker compose -f infra/docker-compose.yml -f infra/docker-compose.test.yml up -
 
 `market-mysql-it` exposes host port `13308` and stores data in `tmpfs`; start it before the test and let Flyway create the schema. It is intentionally excluded from production and EC2 commands.
 
+Member-Point has the same kind of disposable container, `member-point-mysql-it` (`memberpoint_test` / `memberpoint_test_user`, host port `13307`, `tmpfs`), for tests that use MySQL-only SQL such as the settlement credit batch (`VALUES ROW` join). Those tests use the `mysqlit` profile (`member-point-service/src/test/resources/application-mysqlit.yml`):
+
+```powershell
+docker compose -f infra/docker-compose.yml -f infra/docker-compose.test.yml up -d member-point-mysql-it
+```
+
 ## Architecture follow-ups (not part of this change)
 
 - Market point spend, settlement, and refund are REST calls with idempotency keys; timeout recovery and reconciliation remain synchronous-workflow concerns. They are candidates for a future transactional outbox and Saga design.

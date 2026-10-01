@@ -6,10 +6,10 @@ import com.todongsan.memberpointservice.member.entity.Member;
 import com.todongsan.memberpointservice.member.repository.MemberRepository;
 import com.todongsan.memberpointservice.point.dto.response.BatchItemResult;
 import com.todongsan.memberpointservice.point.entity.PointHistoryType;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.math.BigDecimal;
@@ -24,35 +24,19 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 배치 경로는 건 단위 경로와 판정·기록 결과가 같아야 한다 (ASYNC_POINT_FLOW.md §17.5).
  * 같은 이벤트 묶음을 두 경로로 각각 처리하고 (회원·키만 다르고 잔액은 같게), 결과·잔액·이력·결과 이벤트를 비교한다.
+ * 배치 경로가 MySQL 전용 문법(VALUES ROW JOIN)을 쓰므로 MySQL 통합 테스트 환경에서 돈다 (§17.9).
  */
 @SpringBootTest
+@ActiveProfiles("mysqlit")
 class MarketPointCreditBatchEquivalenceTest {
 
     private static final AtomicLong SEQ = new AtomicLong(System.nanoTime() % 1_000_000);
-    private static final String CREATE_OUTBOX = """
-            CREATE TABLE IF NOT EXISTS point_outbox_event (
-                id BIGINT NOT NULL AUTO_INCREMENT,
-                event_id CHAR(36) NOT NULL,
-                aggregate_type VARCHAR(50) NOT NULL,
-                aggregate_id VARCHAR(50) NOT NULL,
-                event_type VARCHAR(80) NOT NULL,
-                payload CLOB NOT NULL,
-                created_at DATETIME(3) NOT NULL,
-                PRIMARY KEY (id),
-                UNIQUE (event_id)
-            )
-            """;
 
     @Autowired MarketPointRequestService recordPath;
     @Autowired MarketPointCreditBatchApplier batchPath;
     @Autowired MemberRepository memberRepository;
     @Autowired JdbcTemplate jdbcTemplate;
     @Autowired ObjectMapper objectMapper;
-
-    @BeforeEach
-    void setUp() {
-        jdbcTemplate.execute(CREATE_OUTBOX);
-    }
 
     @Test
     void 배치_경로와_건_단위_경로의_결과가_같다() throws Exception {

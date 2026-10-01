@@ -766,3 +766,25 @@ MP:     해당 예측들의 SETTLE_MARKET 이력 = N건 (중복 없음), Σ amou
 | async 정산 (MP 클라이언트 http) | run 1 PASS |
 | sync 정산 (Feign → 실제 MP) | run 2 PASS, outbox 기록 없음 |
 | `cleanup.sh run / runs / all` | 단계별 삭제 범위 정확, 정리 후 재생성 가능, **개발 데이터 건수·AUTO_INCREMENT가 시작 전과 동일** |
+
+#### 실행 도구
+
+| 파일 | 역할 |
+|---|---|
+| `apps.sh build / start <sync\|async> [key] / stop` | bootJar 빌드, 실험 설정으로 두 앱 기동(MP 클라이언트 http, 대사·신뢰도·outbox 삭제 스케줄러 off), 상태 파일 기록 |
+| `k6/settlement.js` | `load`: 승자 회원 무작위 MP spend 고정 도착률, `settle`: PRE(5s) 시점에 정산 API 호출 + 시작 시각 기록 |
+| `run.sh <run> <N> [rate] [label]` | health → seed → 락 지표(전) → **컨테이너 내부 DB 폴러**(MP 반영·Market 완료) → k6 → 락 지표(후) → `verify.sh` → `Analyze.java` → `results.csv` |
+| `Analyze.java` | k6 JSON에서 spend 지연을 **정산 전(before) / 정산 중(t0 → MP 반영 완료)** 구간으로 나눠 p50·p95·p99 |
+| `suite.sh [rounds] [rate] [sizes]` | sync / async+member_id / async+market_id 순서로 기동 → warmup(N=10) → N × rounds |
+
+시각 기준: k6 컨테이너와 DB 컨테이너 안의 폴러는 같은 Docker VM 커널 시계를 쓴다. 호스트(Windows) 시계는 쓰지 않는다 (두 시계가 섞이면 구간 경계가 어긋난다).
+
+#### 실행 도구 검증 (2026-10-01)
+
+미니 suite (rounds 1, N=20, rate 10, load 20s): 3개 설정 × (warmup + 1회) = 6 run 모두 `verify` PASS, 약 6.4분.
+
+| # | 발견 | 반영 |
+|---|---|---|
+| F10 | 앱 기동 직후 run의 정산 전(before) spend p95가 1,183~1,336ms (JIT·커넥션 풀 초기화). 같은 설정의 다음 run은 30~43ms | 설정마다 **warmup run**(N=10, `label=warmup`)을 먼저 실행하고 분석에서 제외 |
+| F11 | k6 로그의 응답 본문은 따옴표가 이스케이프(`\"`)되어 `settlementStatus` 파싱 실패 → `set -o pipefail`로 CSV 기록 직전 종료 | 이스케이프와 무관한 패턴으로 파싱, 실패 시 `NA` |
+| F12 | Windows JVM이 Git Bash 경로(`/c/...`)를 해석하지 못함 | `cygpath -m`으로 변환해 전달 |

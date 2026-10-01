@@ -12,10 +12,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
-import java.util.Map;
-
 /**
- * Market 포인트 적립 요청(market.point-requests)을 처리한다.
+ * Market 포인트 적립 요청을 처리한다. 업무 흐름마다 토픽이 다르다 (market.refund-requests, market.settlement-payout-requests).
  * 일시 장애는 예외를 던져 재시도하고, 처리 불가 메시지는 NonRetryableEventException으로 DLT에 보낸다.
  * 처리 실패 직후 DB 상태 확인까지 실패하면 DatabaseUnavailableException으로 알려 DLT 대신 복구를 기다린다.
  */
@@ -26,19 +24,28 @@ import java.util.Map;
 public class MarketPointRequestConsumer {
 
     private static final int SUPPORTED_SCHEMA_VERSION = 1;
-    private static final Map<String, PointHistoryType> HISTORY_TYPES = Map.of(
-            "MARKET_REFUND_REQUESTED", PointHistoryType.REFUND_MARKET,
-            "MARKET_SETTLEMENT_PAYOUT_REQUESTED", PointHistoryType.SETTLE_MARKET
-    );
+    static final String MARKET_REFUND_REQUESTED = "MARKET_REFUND_REQUESTED";
+    static final String MARKET_SETTLEMENT_PAYOUT_REQUESTED = "MARKET_SETTLEMENT_PAYOUT_REQUESTED";
 
     private final ObjectMapper objectMapper;
     private final MarketPointRequestService marketPointRequestService;
     private final JdbcTemplate jdbcTemplate;
 
-    @KafkaListener(topics = "${member-point.kafka.market-point-requests.topic}")
-    public void consume(ConsumerRecord<String, String> record) throws DatabaseUnavailableException {
+    /** 토픽마다 listener container가 따로라 처리 thread도 따로다. 대량 정산 지급이 환불을 지연시키지 않는다. */
+    @KafkaListener(topics = "${member-point.kafka.market-point-requests.refund-topic}")
+    public void consumeRefund(ConsumerRecord<String, String> record) throws DatabaseUnavailableException {
+        consume(record, MARKET_REFUND_REQUESTED, PointHistoryType.REFUND_MARKET);
+    }
+
+    @KafkaListener(topics = "${member-point.kafka.market-point-requests.settlement-payout-topic}")
+    public void consumeSettlementPayout(ConsumerRecord<String, String> record) throws DatabaseUnavailableException {
+        consume(record, MARKET_SETTLEMENT_PAYOUT_REQUESTED, PointHistoryType.SETTLE_MARKET);
+    }
+
+    private void consume(ConsumerRecord<String, String> record, String expectedEventType, PointHistoryType type)
+            throws DatabaseUnavailableException {
         MarketPointRequestEvent event = parse(record.value());
-        PointHistoryType type = historyType(event);
+        validateType(event, expectedEventType, record.topic());
         MarketPointRequestEvent.Data data = event.data();
 
         BatchItemResult result;
@@ -88,16 +95,15 @@ public class MarketPointRequestConsumer {
         }
     }
 
-    private PointHistoryType historyType(MarketPointRequestEvent event) {
+    /** 토픽이 곧 업무 흐름이다. 토픽과 다른 타입은 발행 측 버그이므로 재시도하지 않는다 (ASYNC_POINT_FLOW.md §8.1 E5). */
+    private void validateType(MarketPointRequestEvent event, String expectedEventType, String topic) {
         if (event.schemaVersion() == null || event.schemaVersion() != SUPPORTED_SCHEMA_VERSION) {
             throw new NonRetryableEventException("Unsupported schemaVersion=" + event.schemaVersion()
                     + ", eventId=" + event.eventId());
         }
-        PointHistoryType type = HISTORY_TYPES.get(event.eventType());
-        if (type == null) {
-            throw new NonRetryableEventException("Unknown eventType=" + event.eventType()
-                    + ", eventId=" + event.eventId());
+        if (!expectedEventType.equals(event.eventType())) {
+            throw new NonRetryableEventException("Unexpected eventType=" + event.eventType()
+                    + " for topic=" + topic + ", eventId=" + event.eventId());
         }
-        return type;
     }
 }

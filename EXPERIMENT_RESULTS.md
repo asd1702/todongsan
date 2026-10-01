@@ -140,3 +140,16 @@
 - run 22 동안 spend 부하 201건 중 163건 실패(p50 30s). k6 부하는 MP spend API를 직접 호출하므로 MP DB 장애가 그대로 드러난 것이고, 비동기 경로와는 무관하다. Market 경유 spend는 동기 Saga(§12.3)의 `POINT_UNKNOWN` + 대사로 처리된다 (이번 run에서는 미측정).
 - DB 장애는 예외 종류가 일정하지 않았다 (`TransactionSystemException`, `CannotCreateTransactionException`, `UncategorizedSQLException`). 예외 종류가 아닌 DB 상태로 판단한 근거다.
 - Spring Kafka `DefaultErrorHandler`는 재시도 상태 리셋을 예외 클래스 `isInstance`로 판단한다. 장애·일반 실패가 같은 타입이면 poison이 1시간 대기에 묶이는 것을 단위 테스트(실제 handler)로 재현하고 타입 분리로 해결했다.
+
+## ⑦ 요청 토픽 분리 회귀 확인
+
+실행일: 2026-10-01 / 설계: `docs/architecture/ASYNC_POINT_FLOW.md` §8.1 E5, §8.3 / async + member_id
+
+| run | 시나리오 | 결과 |
+|---|---|---|
+| 23 | 정산 N=200 (spend 부하 포함, `run.sh`) | `market.settlement-payout-requests` +200, `market.refund-requests` +0, 기존 `market.point-requests` +0. verify PASS |
+| 24 | 무효 → 환불 75건 | `market.refund-requests` +75. 무효 `COMPLETED`, detail SUCCESS 75, MP `REFUND_MARKET` 75건 = 10,800P (전체 풀과 일치) |
+| 27 + 28 | **MP 중지 상태**에서 정산 200건 + 환불 75건 요청 → MP 재기동 | 중지 중 lag가 토픽별로 쌓임 (정산 지급 200 / 환불 75). 재기동 후 정산 `SETTLED`(verify PASS), 환불 `COMPLETED`(Market detail ↔ MP 이력 75건·10,800P 일치, 중복 0) |
+
+- MP는 토픽마다 listener container가 따로라 파티션 6개(토픽 2 × 3)를 각각 배정받는다.
+- 전환 시 기존 `market.point-requests`는 lag 0 상태로 남아 있다. 비운 것을 확인했으므로 삭제 가능 (§8.3 전환 절차).

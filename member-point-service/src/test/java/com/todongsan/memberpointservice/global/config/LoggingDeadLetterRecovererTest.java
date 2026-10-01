@@ -20,7 +20,7 @@ import static org.mockito.Mockito.verify;
 class LoggingDeadLetterRecovererTest {
 
     private final ConsumerRecord<String, String> record =
-            new ConsumerRecord<>("market.point-requests", 2, 17L, "101", "{not-json");
+            new ConsumerRecord<>("market.settlement-payout-requests", 2, 17L, "101", "{not-json");
     private final Exception failure = new ListenerExecutionFailedException(
             "listener failed", new NonRetryableEventException("Malformed market point request event"));
 
@@ -31,7 +31,7 @@ class LoggingDeadLetterRecovererTest {
         new LoggingDeadLetterRecoverer(delegate).accept(record, failure);
 
         verify(delegate).accept(record, failure);
-        assertThat(output).contains("Sent to DLT. topic=market.point-requests, partition=2, offset=17, key=101")
+        assertThat(output).contains("Sent to DLT. topic=market.settlement-payout-requests, partition=2, offset=17, key=101")
                 .contains("cause=com.todongsan.memberpointservice.point.event.NonRetryableEventException: Malformed market point request event")
                 .doesNotContain("cause={}");
     }
@@ -44,7 +44,7 @@ class LoggingDeadLetterRecovererTest {
         assertThatThrownBy(() -> new LoggingDeadLetterRecoverer(delegate).accept(record, failure))
                 .isInstanceOf(KafkaException.class);
 
-        assertThat(output).contains("Failed to publish to DLT. topic=market.point-requests")
+        assertThat(output).contains("Failed to publish to DLT. topic=market.settlement-payout-requests")
                 .doesNotContain("Sent to DLT.");
     }
 }

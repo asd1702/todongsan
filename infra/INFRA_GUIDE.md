@@ -508,12 +508,13 @@ docker exec -i member-point-mysql mysql -uroot -p<MEMBERPOINT_MYSQL_ROOT_PASSWOR
 ```
 
 파티션 수: 토픽은 브로커 기본값(`KAFKA_NUM_PARTITIONS: 3`)으로 자동 생성된다. 실제 병렬도는 min(listener 동시성 × 인스턴스 수, 파티션 수)이다.
-파티션은 늘리기만 가능하고, 늘리면 key → 파티션 배치가 바뀌어 key 단위 순서 보장이 일시적으로 깨질 수 있다 (`ASYNC_POINT_FLOW.md` §3.3).
+파티션은 늘리기만 가능하고, 늘리면 key → 파티션 배치가 바뀌어 같은 key가 잠시 두 thread에서 처리될 수 있다. 정합성은 멱등성·상태 가드로 유지되고 락 경합만 일시적으로 는다 (`ASYNC_POINT_FLOW.md` §3.3).
 
 | 토픽 | 발행 | 소비 | key |
 |---|---|---|---|
-| `market.point-requests` | Debezium (`market_outbox_event`) | member-point-service | `member_id` |
-| `market.point-requests-dlt` | member-point-service (처리 실패) | 수동 확인 | 원본 key |
+| `market.settlement-payout-requests` | Debezium (`market_outbox_event`, `aggregate_type = settlement-payout-requests`) | member-point-service (전용 listener) | `member_id` |
+| `market.refund-requests` | Debezium (`market_outbox_event`, `aggregate_type = refund-requests`) | member-point-service (전용 listener) | `member_id` |
+| `market.settlement-payout-requests-dlt`, `market.refund-requests-dlt` | member-point-service (처리 실패) | 수동 확인 | 원본 key |
 | `memberpoint.point-results` | Debezium (`point_outbox_event`) | market-service | `market_id` |
 | `memberpoint.point-results-dlt` | market-service (처리 실패) | 수동 확인 | 원본 key |
 
@@ -529,7 +530,7 @@ docker exec -i member-point-mysql mysql -uroot -p<MEMBERPOINT_MYSQL_ROOT_PASSWOR
 **DLT 유입 알림** — 각 서비스가 DLT로 보낼 때 ERROR 로그를 남긴다.
 
 ```text
-Sent to DLT. topic=market.point-requests, partition=0, offset=12, key=999, cause=...NonRetryableEventException: ...
+Sent to DLT. topic=market.settlement-payout-requests, partition=0, offset=12, key=999, cause=...NonRetryableEventException: ...
 Failed to publish to DLT. ...   ← DLT 발행 자체가 실패. 레코드는 커밋되지 않고 다시 처리된다
 ```
 
@@ -537,12 +538,12 @@ Failed to publish to DLT. ...   ← DLT 발행 자체가 실패. 레코드는 �
 
 ```bash
 # 재발행 (소비 측이 멱등이므로 안전). 전용 group으로 이미 재발행한 메시지는 다시 보내지 않는다
-./scripts/cdc/replay-dlt.sh market.point-requests-dlt --dry-run
-./scripts/cdc/replay-dlt.sh market.point-requests-dlt
+./scripts/cdc/replay-dlt.sh market.settlement-payout-requests-dlt --dry-run
+./scripts/cdc/replay-dlt.sh market.settlement-payout-requests-dlt
 
 # 건너뛰기 (재처리 불가 메시지를 확인 완료로 표시). 메시지는 DLT 토픽에 그대로 남는다
 MSYS_NO_PATHCONV=1 docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:29092 \
-  --group dlt-replay.market.point-requests-dlt --topic market.point-requests-dlt --reset-offsets --to-latest --execute
+  --group dlt-replay.market.settlement-payout-requests-dlt --topic market.settlement-payout-requests-dlt --reset-offsets --to-latest --execute
 ```
 
 **커넥터 재시작** — 상태가 `FAILED`이면 원인(커넥터 로그) 확인 후 재시작한다. outbox row는 DB에 남아 있으므로 binlog 위치부터 다시 발행된다.

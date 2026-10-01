@@ -37,7 +37,7 @@ class AsyncSettlementTest {
     private static final long MARKET_ID = 100L;
     private static final long WIN_OPTION_ID = 101L;
     private static final long LOSE_OPTION_ID = 102L;
-    private static final EventContract CONTRACT = EventContract.load("market.point-requests.v1.schema.json");
+    private static final EventContract CONTRACT = EventContract.load("market.settlement-payout-requests.v1.schema.json");
 
     private MockMvc mockMvc;
 
@@ -112,6 +112,8 @@ class AsyncSettlementTest {
                 .isEqualTo("MARKET_SETTLEMENT_REWARD:market:100:prediction:1001:member:1");
         assertThat(jdbcTemplate.queryForObject("SELECT aggregate_id FROM market_outbox_event", String.class))
                 .isEqualTo("1");
+        assertThat(jdbcTemplate.queryForObject("SELECT aggregate_type FROM market_outbox_event", String.class))
+                .isEqualTo("settlement-payout-requests");
 
         assertThat(apply(1001L, 1L, true, null)).isEqualTo(PointResultApplyOutcome.APPLIED);
 

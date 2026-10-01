@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # DLT 메시지를 원 토픽에 재발행한다 (docs/architecture/ASYNC_POINT_FLOW.md §6.1 R3)
 #
-#   ./scripts/cdc/replay-dlt.sh market.point-requests-dlt --dry-run   # 재발행 대상 건수만 확인
-#   ./scripts/cdc/replay-dlt.sh market.point-requests-dlt             # 재발행
+#   ./scripts/cdc/replay-dlt.sh market.settlement-payout-requests-dlt --dry-run   # 재발행 대상 건수만 확인
+#   ./scripts/cdc/replay-dlt.sh market.settlement-payout-requests-dlt             # 재발행
 #
 # - 원인을 해결한 뒤 실행한다. 소비 측이 멱등이므로 같은 메시지가 다시 처리되어도 안전하다.
 # - 전용 consumer group(dlt-replay.<dlt-topic>)으로 읽으므로 이미 재발행한 메시지는 다시 보내지 않는다.

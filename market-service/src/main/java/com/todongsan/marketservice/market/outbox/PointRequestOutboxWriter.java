@@ -21,15 +21,15 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 /**
- * market.point-requests 이벤트를 outbox 테이블에 기록한다.
+ * 포인트 적립 요청 이벤트(market.refund-requests, market.settlement-payout-requests)를 outbox 테이블에 기록한다.
  * 호출자의 트랜잭션 안에서 실행되어야 한다. 발행은 Debezium이 담당한다.
- * 스키마: contracts/events/market.point-requests.v1.schema.json
+ * 토픽은 이벤트 타입이 정한다 ({@link PointRequestEventType#aggregateType()}).
+ * 스키마: contracts/events/market.refund-requests.v1.schema.json, market.settlement-payout-requests.v1.schema.json
  */
 @Component
 @RequiredArgsConstructor
 public class PointRequestOutboxWriter {
 
-    static final String AGGREGATE_TYPE = "point-requests";
     static final int SCHEMA_VERSION = 1;
     private static final String PRODUCER = "market-service";
     private static final String REFERENCE_TYPE = "MARKET_PREDICTION";
@@ -108,7 +108,7 @@ public class PointRequestOutboxWriter {
         return new MarketOutboxEvent(
                 null,
                 eventId,
-                AGGREGATE_TYPE,
+                eventType.aggregateType(),
                 messageKey(data),
                 eventType.name(),
                 toJson(envelope),

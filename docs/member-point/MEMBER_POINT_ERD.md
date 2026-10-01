@@ -94,7 +94,7 @@ CREATE INDEX idx_point_history_reference ON point_history(reference_type, refere
 
 > 도입 예정. 설계 근거와 이벤트 스키마는 `docs/architecture/ASYNC_POINT_FLOW.md` §8~§9를 따른다.
 
-Market 포인트 적립 요청 이벤트(`market.point-requests`)를 처리한 트랜잭션에서, `point_history` 기록과 함께 결과 이벤트를 기록한다.
+Market 포인트 적립 요청 이벤트(`market.refund-requests`, `market.settlement-payout-requests`)를 처리한 트랜잭션에서, `point_history` 기록과 함께 결과 이벤트를 기록한다.
 Debezium Outbox Event Router가 `memberpoint.point-results` 토픽으로 발행한다.
 
 ```sql

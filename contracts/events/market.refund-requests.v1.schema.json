@@ -1,15 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://todongsan/contracts/events/market.point-requests.v1.schema.json",
-  "title": "market.point-requests v1",
-  "description": "Market -> Member-Point 포인트 적립 요청. 회원(prediction) 1건당 이벤트 1개. Kafka key = member_id.",
+  "$id": "https://todongsan/contracts/events/market.refund-requests.v1.schema.json",
+  "title": "market.refund-requests v1",
+  "description": "Market -> Member-Point 무효 환불 적립 요청. 회원(prediction) 1건당 이벤트 1개. Kafka key = member_id.",
   "type": "object",
   "required": ["eventId", "eventType", "schemaVersion", "occurredAt", "producer", "data"],
   "properties": {
     "eventId": { "type": "string", "format": "uuid" },
     "eventType": {
       "type": "string",
-      "enum": ["MARKET_REFUND_REQUESTED", "MARKET_SETTLEMENT_PAYOUT_REQUESTED"]
+      "const": "MARKET_REFUND_REQUESTED"
     },
     "schemaVersion": { "const": 1 },
     "occurredAt": {
@@ -36,7 +36,7 @@
         "idempotencyKey": {
           "type": "string",
           "maxLength": 150,
-          "pattern": "^MARKET_(REFUND|SETTLEMENT_REWARD):market:[0-9]+:prediction:[0-9]+:member:[0-9]+$"
+          "pattern": "^MARKET_REFUND:market:[0-9]+:prediction:[0-9]+:member:[0-9]+$"
         }
       },
       "additionalProperties": true

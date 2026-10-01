@@ -1,6 +1,6 @@
 # Market ↔ Member-Point 비동기 포인트 흐름 설계
 
-> 상태: **구현 중** (1~5단계 완료, 결과 반영 배치화·DB 장애 대기 완료(§16). 다음: 요청 토픽 분리(§8.1 E5), 6단계 펜싱)
+> 상태: **구현 중** (1~5단계 완료, 결과 반영 배치화·DB 장애 대기 완료(§16), 요청 토픽 분리 완료(§8.3). 다음: 6단계 펜싱)
 > 범위: Market Service ↔ Member-Point Service. Battle / Insight 연계는 이 문서의 범위가 아니다.
 > 상위 원칙: 루트 `AGENTS.md` 섹션 5 "비동기 이벤트 원칙 (DB = SSOT, CDC)"
 
@@ -78,7 +78,7 @@ outbox row의 키는 발행 측이 정하므로 토픽마다 키를 다르게 �
 
 | 토픽 | 방향 | 키 | 소비 측 lock 단위 |
 |---|---|---|---|
-| `market.point-requests` | Market → MP | `member_id` | MP 회원 잔액 row |
+| `market.settlement-payout-requests` / `market.refund-requests` | Market → MP | `member_id` | MP 회원 잔액 row |
 | `memberpoint.point-results` | MP → Market | `market_id` | Market 정산/무효 row |
 
 ### 3.3 병렬 처리와 파티션 수
@@ -113,7 +113,7 @@ concurrency=6  → 3개 thread는 배정 없이 대기               병렬도 3
         │
         │ Debezium (market-mysql, Outbox Event Router)
         ▼
-  market.point-requests
+  market.settlement-payout-requests / market.refund-requests   (업무 흐름별 토픽, MP listener도 토픽마다 따로)
         │
         ▼
 [MP consumer TX]  (메시지 1건 = TX 1개)
@@ -175,7 +175,7 @@ item 멱등성 키는 기존 형식을 그대로 쓴다.
 
 | # | 항목 | 정책 | 상태 |
 |---|---|---|---|
-| R1 | MP 요청 consumer | 4회 지수 backoff (1s→2s→4s→8s) 후 `market.point-requests-dlt`. `NonRetryableEventException`은 즉시 DLT | 구현 완료 (2단계) |
+| R1 | MP 요청 consumer | 4회 지수 backoff (1s→2s→4s→8s) 후 `{요청 토픽}-dlt` (`market.settlement-payout-requests-dlt`, `market.refund-requests-dlt`). `NonRetryableEventException`은 즉시 DLT | 구현 완료 (2단계) |
 | R2 | Market 결과 consumer | R1과 동일 정책, `memberpoint.point-results-dlt` | 3단계 |
 | R8 | DB 장애 (R1·R2 공통) | 처리 실패 직후 `SELECT 1`도 실패하면 DB 장애로 보고 DLT로 보내지 않는다. 30초 간격으로 최대 1시간(실제 경과 시간) 대기 후에도 실패하면 DLT | 완료 (§16.2) |
 | R3 | DLT 처리 | **자동 재처리하지 않는다.** 원인 해결 후 스크립트로 원 토픽에 재발행. 소비 측이 멱등하므로 재발행해도 안전 | 완료 (5단계, `scripts/cdc/replay-dlt.sh`) |
@@ -233,7 +233,7 @@ async 모드에서 `MarketRefundRetryScheduler`(및 4단계 이후 `MarketSettle
 | E2 | 스키마 관리 | `contracts/events/*.schema.json` (JSON Schema 2020-12)을 Git으로 관리, 양쪽 서비스 계약 테스트로 검증 | 형상 관리는 Git이 담당 |
 | E3 | Schema Registry | 지금은 두지 않는다. 이후 **CI에서 Registry 호환성 검사**를 추가한다 | outbox 구조에서는 Debezium이 발행하므로 Registry 거부가 DB 커밋 이후 발생 → 커넥터 정지. 배포 전(CI)에 거르는 것이 안전 |
 | E4 | eventId | UUID | 서비스 간 추적, 요청-결과 연결 |
-| E5 | 이벤트 타입 | 현재: 토픽 하나에 `eventType`으로 구분. **변경 결정: 요청 토픽을 업무 흐름별로 분리** (정산 지급 / 환불), 결과 토픽은 하나 유지 (아래 "토픽과 타입 필드의 경계") | ~~같은 회원의 환불·정산 이벤트 간 순서 보장은 같은 토픽·파티션에서만 성립~~ (정정: 두 흐름 사이에 순서가 필요한 규칙이 없고, 정합성은 순서가 아니라 멱등성 키 + 단조 상태 전이로 보장된다. §3.2) |
+| E5 | 이벤트 타입 | **요청 토픽을 업무 흐름별로 분리** (구현 완료, 이전: 토픽 하나에 `eventType`으로 구분) (정산 지급 / 환불), 결과 토픽은 하나 유지 (아래 "토픽과 타입 필드의 경계") | ~~같은 회원의 환불·정산 이벤트 간 순서 보장은 같은 토픽·파티션에서만 성립~~ (정정: 두 흐름 사이에 순서가 필요한 규칙이 없고, 정합성은 순서가 아니라 멱등성 키 + 단조 상태 전이로 보장된다. §3.2) |
 | E6 | 금액 | 문자열 (`"300.00"`), **항상 양수** | `BigDecimal` 정밀도 보존. 적립/차감 방향은 `eventType`이 결정 (부호 오류로 환불이 차감되는 사고 방지) |
 | E7 | 시각 | ISO-8601 문자열, offset 포함 | Debezium의 `DATETIME` epoch 변환(9시간 어긋남)을 payload에서 회피 |
 
@@ -249,8 +249,7 @@ async 모드에서 `MarketRefundRetryScheduler`(및 4단계 이후 `MarketSettle
 | 예 | `memberpoint.point-results`: "MP 적립 결과"라는 하나의 사실 (`POINT_CREDITED` / `POINT_CREDIT_FAILED`) | 정산 지급(마켓마다 반드시 발생, 대량)과 무효 환불(예외적, 소량) |
 | 나누지 않을 때 문제 | — | 소비자가 필요 없는 타입까지 받아 걸러야 함, 흐름별 lag·DLT·재처리를 따로 볼 수 없음, 한 흐름의 대량 처리가 다른 흐름을 지연시킴 |
 
-결정: 요청 토픽을 `market.settlement-payout-requests` / `market.refund-requests`로 나눈다 (outbox `aggregate_type`으로 라우팅). 결과 토픽은 하나로 유지한다.
-별도 커밋으로 진행하며, 스키마·계약 테스트와 소규모 E2E(MP 재기동 포함)로 회귀를 확인한다.
+결정: 요청 토픽을 `market.settlement-payout-requests` / `market.refund-requests`로 나눈다 (outbox `aggregate_type`으로 라우팅). 결과 토픽은 하나로 유지한다. **구현 완료** (§8.3).
 
 ### 8.2 공통 envelope
 
@@ -265,16 +264,23 @@ outbox `payload` 컬럼에 envelope 전체를 저장하고, Kafka 메시지 valu
 | `producer` | string | 발행 서비스 |
 | `data` | object | 이벤트 타입별 payload |
 
-### 8.3 `market.point-requests` (Market → MP, key = `member_id`)
+### 8.3 포인트 적립 요청 (Market → MP, key = `member_id`)
 
-스키마: [`contracts/events/market.point-requests.v1.schema.json`](../../contracts/events/market.point-requests.v1.schema.json)
+업무 흐름마다 토픽이 다르다 (§8.1 E5). 토픽 하나에는 eventType 하나만 들어간다.
 
-| eventType | MP `PointHistoryType` | 발생 시점 |
-|---|---|---|
-| `MARKET_REFUND_REQUESTED` | `REFUND_MARKET` | 무효 처리 TX에서 `market_refund_detail` 생성 시 |
-| `MARKET_SETTLEMENT_PAYOUT_REQUESTED` | `SETTLE_MARKET` | 정산 준비 TX에서 `market_settlement_detail` 생성 시 |
+| 토픽 | 스키마 | eventType | MP `PointHistoryType` | 발생 시점 |
+|---|---|---|---|---|
+| `market.settlement-payout-requests` | [`market.settlement-payout-requests.v1.schema.json`](../../contracts/events/market.settlement-payout-requests.v1.schema.json) | `MARKET_SETTLEMENT_PAYOUT_REQUESTED` | `SETTLE_MARKET` | 정산 준비 TX에서 `market_settlement_detail` 생성 시 |
+| `market.refund-requests` | [`market.refund-requests.v1.schema.json`](../../contracts/events/market.refund-requests.v1.schema.json) | `MARKET_REFUND_REQUESTED` | `REFUND_MARKET` | 무효 처리 TX에서 `market_refund_detail` 생성 시 |
 
-`data` 필드는 기존 배치 API item(`MemberPointRefundItem`, `MemberPointSettlementItem`)과 같다.
+- 라우팅: Market이 outbox `aggregate_type`을 이벤트 타입에 따라 기록하고 (`PointRequestEventType.aggregateType()`), Debezium이 `market.{aggregate_type}`으로 발행한다. 커넥터 설정은 바꾸지 않는다.
+- MP는 토픽마다 listener를 따로 둔다. container가 따로라 처리 thread도 따로이므로 대량 정산 지급이 환불을 지연시키지 않는다. 토픽과 다른 eventType은 발행 측 버그이므로 `NonRetryableEventException` (즉시 DLT).
+- envelope과 `data` 필드는 두 토픽이 같다. `data` 필드는 기존 배치 API item(`MemberPointRefundItem`, `MemberPointSettlementItem`)과 같다.
+- MP 처리 thread 수는 listener 2개 × 동시성 3 = 6이다. 평소에는 한쪽만 바쁘지만 정산과 무효가 겹치면 MP DB 커넥션 풀(Hikari 기본 10)을 spend API와 나눠 쓴다.
+
+**전환 절차 (기존 `market.point-requests`에서)**: 토픽은 발행 시점에 정해지므로 이미 발행된 메시지는 기존 토픽에 남는다.
+① Market을 먼저 배포한다 (새 요청은 새 토픽에 쌓이고, 아직 구독자가 없어도 보관된다) → ② 기존 MP가 `market.point-requests` lag 0까지 처리 → ③ MP 배포. 새 토픽에는 커밋된 offset이 없으므로 `auto-offset-reset: earliest`로 처음부터 읽는다.
+기존 토픽과 `market.point-requests-dlt`는 비운 것을 확인한 뒤 삭제한다.
 
 ```json
 {
@@ -350,7 +356,7 @@ Market은 `requestEventType`으로 대상 테이블(환불/정산 detail)을 고
 CREATE TABLE market_outbox_event (          -- member-point: point_outbox_event
     id              BIGINT          NOT NULL AUTO_INCREMENT,
     event_id        CHAR(36)        NOT NULL,   -- envelope.eventId, Kafka header "id"
-    aggregate_type  VARCHAR(50)     NOT NULL,   -- 토픽 라우팅 값: 'point-requests' → market.point-requests
+    aggregate_type  VARCHAR(50)     NOT NULL,   -- 토픽 라우팅 값 (market.{aggregate_type}): 'settlement-payout-requests', 'refund-requests'
     aggregate_id    VARCHAR(50)     NOT NULL,   -- Kafka message key (요청: member_id / 결과: market_id)
     event_type      VARCHAR(80)     NOT NULL,   -- envelope.eventType, Kafka header "eventType"
     payload         JSON            NOT NULL,   -- envelope 전체
@@ -398,7 +404,7 @@ CREATE TABLE market_outbox_event (          -- member-point: point_outbox_event
 | 4 | **정산 적용** — **완료** (§14): 2~3 구조를 정산에 적용, 패자 처리 시점(S1), 결과 반영 가드(S2), 정체 PENDING 감지·재시도(S3, 두 모드) | 정산 → `SETTLED` 자동 완료, 패자는 준비 직후 `SETTLED`, reputation task 1회 생성, 금액이 sync와 동일, 기존 정산 테스트 통과 |
 | 5 | 정리: DLT 재발행 스크립트 (R3), DLT 경고·lag·커넥터 점검 절차 (R6, §6.3), outbox 삭제 (R7), 실험 수행 및 결과 기록 | 전체 테스트, 실험 결과 문서화 |
 | 5+ | **결과 반영 배치화 + DB 장애 대기** — **완료** (§16): Market 결과 consumer batch listener, 배치 내 실패 격리, 두 consumer의 DB 장애 대기 (R8) | 정합성 테스트, suite before/after, 장애 주입 E2E (`EXPERIMENT_RESULTS.md` ⑥) |
-| 5++ | **요청 토픽 분리** (§8.1 E5): 정산 지급 / 환불 요청 토픽 분리, 결과 토픽 유지 | 스키마·계약 테스트, 소규모 E2E, MP 재기동 |
+| 5++ | **요청 토픽 분리** — **완료** (§8.1 E5, §8.3): 정산 지급 / 환불 요청 토픽 분리, MP listener 분리, 결과 토픽 유지 | 스키마·계약 테스트, 소규모 E2E, MP 재기동 |
 | 6 | **spend 펜싱** (§12.6): MP `POST /internal/api/v1/points/spend/fence`, Market 대사 `NOT_FOUND` 처리 변경 | 펜싱 후 늦게 도착한 spend가 차감하지 못함, 펜싱과 spend 동시 실행 시 결과가 하나로 결정됨 |
 
 환불을 먼저 하는 이유: 원금 반환이라 금액 계산이 없고, 정산은 배당 계산·잔여 소각·reputation task 생성이 얽혀 있다.

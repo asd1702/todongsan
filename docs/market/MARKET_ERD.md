@@ -913,7 +913,7 @@ content 길이 500자 제한은 API validation으로 적용한다.
 > 도입 예정. 설계 근거와 이벤트 스키마는 `docs/architecture/ASYNC_POINT_FLOW.md` §8~§9를 따른다.
 
 환불/정산 detail 생성과 같은 트랜잭션에서 Member-Point로 보낼 포인트 적립 요청 이벤트를 기록한다.
-Debezium Outbox Event Router가 binlog의 INSERT를 읽어 `market.point-requests` 토픽으로 발행한다.
+Debezium Outbox Event Router가 binlog의 INSERT를 읽어 `aggregate_type`에 따라 `market.refund-requests` / `market.settlement-payout-requests` 토픽으로 발행한다.
 애플리케이션은 Kafka에 직접 발행하지 않는다.
 
 ```sql
@@ -921,7 +921,7 @@ CREATE TABLE market_outbox_event (
     id              BIGINT          NOT NULL AUTO_INCREMENT,
     event_id        CHAR(36)        NOT NULL,
     aggregate_type  VARCHAR(50)     NOT NULL,
-    -- 토픽 라우팅 값. 'point-requests' → market.point-requests
+    -- 토픽 라우팅 값 (market.{aggregate_type}). 'refund-requests' → market.refund-requests, 'settlement-payout-requests' → market.settlement-payout-requests
 
     aggregate_id    VARCHAR(50)     NOT NULL,
     -- Kafka message key. 기본 member_id, 키 전략 실험 시 market_id
@@ -930,7 +930,7 @@ CREATE TABLE market_outbox_event (
     -- MARKET_REFUND_REQUESTED, MARKET_SETTLEMENT_PAYOUT_REQUESTED
 
     payload         JSON            NOT NULL,
-    -- envelope 전체 (contracts/events/market.point-requests.v1.schema.json)
+    -- envelope 전체 (contracts/events/market.{aggregate_type}.v1.schema.json)
 
     created_at      DATETIME(3)     NOT NULL,
 

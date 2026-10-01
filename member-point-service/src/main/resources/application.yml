@@ -32,7 +32,9 @@ member-point:
     market-point-requests:
       # Market outbox + CDC 비동기 포인트 요청 consumer (docs/architecture/ASYNC_POINT_FLOW.md)
       enabled: ${MARKET_POINT_REQUESTS_CONSUMER_ENABLED:false}
-      topic: market.point-requests
+      # 업무 흐름별 토픽, listener도 토픽마다 따로 둔다 (ASYNC_POINT_FLOW.md §8.1 E5)
+      refund-topic: market.refund-requests
+      settlement-payout-topic: market.settlement-payout-requests
       # DB 장애(실패 직후 SELECT 1도 실패) 시 DLT 대신 기다린다. 한 번의 대기는 max.poll.interval.ms(5분)보다 짧아야 한다 (ASYNC_POINT_FLOW.md §16.1 Q3)
       db-unavailable:
         retry-interval-ms: ${MARKET_POINT_REQUESTS_DB_RETRY_INTERVAL_MS:30000}

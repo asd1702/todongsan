@@ -32,7 +32,7 @@ class AsyncRefundOutboxTest {
     private static final long MARKET_ID = 100L;
     private static final long OPTION_ID = 101L;
     private static final long VOID_ID = 500L;
-    private static final EventContract CONTRACT = EventContract.load("market.point-requests.v1.schema.json");
+    private static final EventContract CONTRACT = EventContract.load("market.refund-requests.v1.schema.json");
 
     private MockMvc mockMvc;
 
@@ -94,7 +94,7 @@ class AsyncRefundOutboxTest {
                 ORDER BY aggregate_id
                 """);
         assertThat(rows).hasSize(2);
-        assertThat(rows).extracting(row -> row.get("AGGREGATE_TYPE")).containsOnly("point-requests");
+        assertThat(rows).extracting(row -> row.get("AGGREGATE_TYPE")).containsOnly("refund-requests");
         assertThat(rows).extracting(row -> row.get("EVENT_TYPE")).containsOnly("MARKET_REFUND_REQUESTED");
         // 기본 키 전략: member_id
         assertThat(rows).extracting(row -> row.get("AGGREGATE_ID")).containsExactly("1", "2");

@@ -28,7 +28,8 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class MarketPointRequestConsumerTest {
 
-    private static final String TOPIC = "market.point-requests";
+    private static final String REFUND_TOPIC = "market.refund-requests";
+    private static final String PAYOUT_TOPIC = "market.settlement-payout-requests";
 
     /** docs/architecture/ASYNC_POINT_FLOW.md §8.3 예시와 동일 (consumer 측 계약 확인) */
     static final String REFUND_EVENT = """
@@ -68,7 +69,7 @@ class MarketPointRequestConsumerTest {
     void 환불_요청_이벤트를_REFUND_MARKET_적립으로_처리한다() throws Exception {
         stubProcessed();
 
-        consumer.consume(record(REFUND_EVENT));
+        consumer.consumeRefund(record(REFUND_EVENT));
 
         ArgumentCaptor<MarketPointRequestEvent> captor = ArgumentCaptor.forClass(MarketPointRequestEvent.class);
         verify(marketPointRequestService).process(captor.capture(), eq(PointHistoryType.REFUND_MARKET));
@@ -87,13 +88,29 @@ class MarketPointRequestConsumerTest {
     @Test
     void 정산_지급_요청_이벤트는_SETTLE_MARKET_적립으로_처리한다() throws Exception {
         stubProcessed();
-        String event = REFUND_EVENT
-                .replace("MARKET_REFUND_REQUESTED", "MARKET_SETTLEMENT_PAYOUT_REQUESTED")
-                .replace("MARKET_REFUND:", "MARKET_SETTLEMENT_REWARD:");
 
-        consumer.consume(record(event));
+        consumer.consumeSettlementPayout(record(PAYOUT_TOPIC, payoutEvent()));
 
         verify(marketPointRequestService).process(any(), eq(PointHistoryType.SETTLE_MARKET));
+    }
+
+    @Test
+    void 토픽과_다른_업무의_이벤트는_재시도하지_않는다() {
+        assertThatThrownBy(() -> consumer.consumeRefund(record(REFUND_TOPIC, payoutEvent())))
+                .isInstanceOf(NonRetryableEventException.class)
+                .hasMessageContaining("MARKET_SETTLEMENT_PAYOUT_REQUESTED")
+                .hasMessageContaining(REFUND_TOPIC);
+        assertThatThrownBy(() -> consumer.consumeSettlementPayout(record(PAYOUT_TOPIC, REFUND_EVENT)))
+                .isInstanceOf(NonRetryableEventException.class)
+                .hasMessageContaining("MARKET_REFUND_REQUESTED")
+                .hasMessageContaining(PAYOUT_TOPIC);
+        verifyNotProcessed();
+    }
+
+    private static String payoutEvent() {
+        return REFUND_EVENT
+                .replace("MARKET_REFUND_REQUESTED", "MARKET_SETTLEMENT_PAYOUT_REQUESTED")
+                .replace("MARKET_REFUND:", "MARKET_SETTLEMENT_REWARD:");
     }
 
     @Test
@@ -102,7 +119,7 @@ class MarketPointRequestConsumerTest {
         String event = REFUND_EVENT.replace("\"producer\": \"market-service\",",
                 "\"producer\": \"market-service\", \"traceId\": \"abc\",");
 
-        consumer.consume(record(event));
+        consumer.consumeRefund(record(event));
 
         verify(marketPointRequestService).process(any(), eq(PointHistoryType.REFUND_MARKET));
     }
@@ -111,7 +128,7 @@ class MarketPointRequestConsumerTest {
     void 모르는_eventType은_재시도하지_않는다() {
         String event = REFUND_EVENT.replace("MARKET_REFUND_REQUESTED", "MARKET_SPEND_REQUESTED");
 
-        assertThatThrownBy(() -> consumer.consume(record(event)))
+        assertThatThrownBy(() -> consumer.consumeRefund(record(event)))
                 .isInstanceOf(NonRetryableEventException.class)
                 .hasMessageContaining("MARKET_SPEND_REQUESTED");
         verifyNotProcessed();
@@ -121,7 +138,7 @@ class MarketPointRequestConsumerTest {
     void 지원하지_않는_schemaVersion은_재시도하지_않는다() {
         String event = REFUND_EVENT.replace("\"schemaVersion\": 1", "\"schemaVersion\": 2");
 
-        assertThatThrownBy(() -> consumer.consume(record(event)))
+        assertThatThrownBy(() -> consumer.consumeRefund(record(event)))
                 .isInstanceOf(NonRetryableEventException.class)
                 .hasMessageContaining("schemaVersion=2");
         verifyNotProcessed();
@@ -129,7 +146,7 @@ class MarketPointRequestConsumerTest {
 
     @Test
     void 깨진_JSON은_재시도하지_않는다() {
-        assertThatThrownBy(() -> consumer.consume(record("{not-json")))
+        assertThatThrownBy(() -> consumer.consumeRefund(record("{not-json")))
                 .isInstanceOf(NonRetryableEventException.class);
         verifyNotProcessed();
     }
@@ -140,7 +157,7 @@ class MarketPointRequestConsumerTest {
                 {"eventId":"7f1c2a9e-4b0d-4c5e-9a51-2f7b3c8d1e04","eventType":"MARKET_REFUND_REQUESTED","schemaVersion":1}
                 """;
 
-        assertThatThrownBy(() -> consumer.consume(record(event)))
+        assertThatThrownBy(() -> consumer.consumeRefund(record(event)))
                 .isInstanceOf(NonRetryableEventException.class);
         verifyNotProcessed();
     }
@@ -150,7 +167,7 @@ class MarketPointRequestConsumerTest {
     void 필수_필드가_없으면_재시도하지_않는다(String field) {
         String event = REFUND_EVENT.replaceAll("(\"" + field + "\": )[^,\\n]+", "$1null");
 
-        assertThatThrownBy(() -> consumer.consume(record(event)))
+        assertThatThrownBy(() -> consumer.consumeRefund(record(event)))
                 .isInstanceOf(NonRetryableEventException.class)
                 .hasMessageContaining("Required field is missing");
         verifyNotProcessed();
@@ -160,7 +177,7 @@ class MarketPointRequestConsumerTest {
     void DB가_살아있는데_처리에_실패하면_그대로_전파해_기본_재시도_후_DLT로_보낸다() {
         when(marketPointRequestService.process(any(), any())).thenThrow(new IllegalStateException("bad message"));
 
-        assertThatThrownBy(() -> consumer.consume(record(REFUND_EVENT)))
+        assertThatThrownBy(() -> consumer.consumeRefund(record(REFUND_EVENT)))
                 .isInstanceOf(IllegalStateException.class)
                 .isNotInstanceOf(NonRetryableEventException.class);
     }
@@ -172,7 +189,7 @@ class MarketPointRequestConsumerTest {
         when(jdbcTemplate.queryForObject("SELECT 1", Integer.class))
                 .thenThrow(new DataAccessResourceFailureException("db down"));
 
-        assertThatThrownBy(() -> consumer.consume(record(REFUND_EVENT)))
+        assertThatThrownBy(() -> consumer.consumeRefund(record(REFUND_EVENT)))
                 .isInstanceOf(DatabaseUnavailableException.class)
                 .hasCause(failure);
     }
@@ -187,6 +204,10 @@ class MarketPointRequestConsumerTest {
     }
 
     private ConsumerRecord<String, String> record(String value) {
-        return new ConsumerRecord<>(TOPIC, 0, 0L, "1001", value);
+        return record(REFUND_TOPIC, value);
+    }
+
+    private ConsumerRecord<String, String> record(String topic, String value) {
+        return new ConsumerRecord<>(topic, 0, 0L, "1001", value);
     }
 }

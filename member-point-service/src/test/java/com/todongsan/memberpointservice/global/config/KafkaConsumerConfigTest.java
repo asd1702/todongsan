@@ -27,7 +27,7 @@ class KafkaConsumerConfigTest {
     private static final int DEFAULT_ATTEMPTS = 5; // 최초 1번 + 재시도 4번
 
     private final ConsumerRecord<String, String> record =
-            new ConsumerRecord<>("market.point-requests", 0, 17L, "1001", "{}");
+            new ConsumerRecord<>("market.settlement-payout-requests", 0, 17L, "1001", "{}");
 
     @SuppressWarnings("unchecked")
     private final KafkaTemplate<Object, Object> kafkaTemplate = mock(KafkaTemplate.class);
@@ -38,7 +38,7 @@ class KafkaConsumerConfigTest {
     @BeforeEach
     @SuppressWarnings("unchecked")
     void setUp() {
-        when(container.getContainerProperties()).thenReturn(new ContainerProperties("market.point-requests"));
+        when(container.getContainerProperties()).thenReturn(new ContainerProperties("market.settlement-payout-requests"));
         when(kafkaTemplate.send(any(ProducerRecord.class))).thenReturn(CompletableFuture.completedFuture(null));
     }
 

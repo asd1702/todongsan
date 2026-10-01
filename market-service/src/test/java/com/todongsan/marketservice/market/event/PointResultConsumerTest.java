@@ -11,6 +11,7 @@ import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.todongsan.marketservice.market.service.MarketRefundTransactionService;
+import com.todongsan.marketservice.market.service.MarketSettlementTransactionService;
 import com.todongsan.marketservice.market.service.PointResultApplyOutcome;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.BeforeEach;
@@ -70,11 +71,14 @@ class PointResultConsumerTest {
     @Mock
     private MarketRefundTransactionService refundTransactionService;
 
+    @Mock
+    private MarketSettlementTransactionService settlementTransactionService;
+
     private PointResultConsumer consumer;
 
     @BeforeEach
     void setUp() {
-        consumer = new PointResultConsumer(new ObjectMapper(), refundTransactionService);
+        consumer = new PointResultConsumer(new ObjectMapper(), refundTransactionService, settlementTransactionService);
     }
 
     @Test
@@ -114,17 +118,34 @@ class PointResultConsumerTest {
 
         assertThatThrownBy(() -> consumer.consume(record(CREDITED_EVENT)))
                 .isInstanceOf(NonRetryableEventException.class)
-                .hasMessageContaining("Refund detail not found");
+                .hasMessageContaining("Detail not found");
     }
 
     @Test
-    void settlementResultIsNotSupportedYet() {
-        String event = CREDITED_EVENT.replace("MARKET_REFUND_REQUESTED", "MARKET_SETTLEMENT_PAYOUT_REQUESTED");
+    void settlementResultIsRoutedToSettlement() {
+        String settlementKey = "MARKET_SETTLEMENT_REWARD:market:42:prediction:7:member:1001";
+        String event = CREDITED_EVENT
+                .replace("MARKET_REFUND_REQUESTED", "MARKET_SETTLEMENT_PAYOUT_REQUESTED")
+                .replace(KEY, settlementKey);
+        when(settlementTransactionService.applyAsyncSettlementResult(42L, settlementKey, true, null))
+                .thenReturn(PointResultApplyOutcome.APPLIED);
+
+        consumer.consume(record(event));
+
+        verify(settlementTransactionService).applyAsyncSettlementResult(42L, settlementKey, true, null);
+        verifyNotApplied();
+    }
+
+    @Test
+    void unknownRequestEventTypeGoesToDlt() {
+        String event = CREDITED_EVENT.replace("MARKET_REFUND_REQUESTED", "MARKET_SPEND_REQUESTED");
 
         assertThatThrownBy(() -> consumer.consume(record(event)))
                 .isInstanceOf(NonRetryableEventException.class)
-                .hasMessageContaining("MARKET_SETTLEMENT_PAYOUT_REQUESTED");
+                .hasMessageContaining("MARKET_SPEND_REQUESTED");
         verifyNotApplied();
+        verify(settlementTransactionService, never())
+                .applyAsyncSettlementResult(anyLong(), anyString(), anyBoolean(), any());
     }
 
     @Test

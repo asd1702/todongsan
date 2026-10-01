@@ -3,6 +3,7 @@ package com.todongsan.marketservice.market.event;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.todongsan.marketservice.market.service.MarketRefundTransactionService;
+import com.todongsan.marketservice.market.service.MarketSettlementTransactionService;
 import com.todongsan.marketservice.market.service.PointResultApplyOutcome;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -12,7 +13,7 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
 /**
- * Member-Point 포인트 적립 결과(memberpoint.point-results)를 환불 detail에 반영한다.
+ * Member-Point 포인트 적립 결과(memberpoint.point-results)를 환불·정산 detail에 반영한다.
  * 일시 장애는 예외를 던져 재시도하고, 처리 불가 메시지는 NonRetryableEventException으로 DLT에 보낸다.
  */
 @Slf4j
@@ -25,9 +26,11 @@ public class PointResultConsumer {
     private static final String POINT_CREDITED = "POINT_CREDITED";
     private static final String POINT_CREDIT_FAILED = "POINT_CREDIT_FAILED";
     private static final String MARKET_REFUND_REQUESTED = "MARKET_REFUND_REQUESTED";
+    private static final String MARKET_SETTLEMENT_PAYOUT_REQUESTED = "MARKET_SETTLEMENT_PAYOUT_REQUESTED";
 
     private final ObjectMapper objectMapper;
     private final MarketRefundTransactionService refundTransactionService;
+    private final MarketSettlementTransactionService settlementTransactionService;
 
     @KafkaListener(topics = "${market.kafka.point-results.topic}")
     public void consume(ConsumerRecord<String, String> record) {
@@ -35,21 +38,17 @@ public class PointResultConsumer {
         PointResultEvent.Data data = event.data();
         boolean credited = POINT_CREDITED.equals(event.eventType());
 
-        if (!MARKET_REFUND_REQUESTED.equals(data.requestEventType())) {
-            // 정산 결과는 4단계에서 처리한다 (ASYNC_POINT_FLOW.md §13.2)
-            throw new NonRetryableEventException("Unsupported requestEventType=" + data.requestEventType()
+        PointResultApplyOutcome outcome = switch (data.requestEventType()) {
+            case MARKET_REFUND_REQUESTED -> refundTransactionService.applyAsyncRefundResult(
+                    data.marketId(), data.idempotencyKey(), credited, data.errorCode());
+            case MARKET_SETTLEMENT_PAYOUT_REQUESTED -> settlementTransactionService.applyAsyncSettlementResult(
+                    data.marketId(), data.idempotencyKey(), credited, data.errorCode());
+            default -> throw new NonRetryableEventException("Unsupported requestEventType=" + data.requestEventType()
                     + ", eventId=" + event.eventId());
-        }
-
-        PointResultApplyOutcome outcome = refundTransactionService.applyAsyncRefundResult(
-                data.marketId(),
-                data.idempotencyKey(),
-                credited,
-                data.errorCode()
-        );
+        };
         if (outcome == PointResultApplyOutcome.DETAIL_NOT_FOUND) {
-            throw new NonRetryableEventException("Refund detail not found. idempotencyKey=" + data.idempotencyKey()
-                    + ", eventId=" + event.eventId());
+            throw new NonRetryableEventException("Detail not found. requestEventType=" + data.requestEventType()
+                    + ", idempotencyKey=" + data.idempotencyKey() + ", eventId=" + event.eventId());
         }
 
         log.info("Point result applied. eventId={}, eventType={}, key={}, idempotencyKey={}, outcome={}, errorCode={}",

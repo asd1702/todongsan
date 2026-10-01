@@ -11,6 +11,7 @@ import com.todongsan.marketservice.market.entity.MarketOption;
 import com.todongsan.marketservice.market.entity.MarketPrediction;
 import com.todongsan.marketservice.market.entity.MarketSettlement;
 import com.todongsan.marketservice.market.entity.MarketSettlementDetail;
+import com.todongsan.marketservice.market.outbox.PointRequestOutboxWriter;
 import com.todongsan.marketservice.market.repository.MarketMapper;
 import com.todongsan.marketservice.market.type.MarketStatus;
 import com.todongsan.marketservice.market.type.SettlementStatus;
@@ -37,11 +38,13 @@ public class MarketSettlementTransactionService {
     private static final BigDecimal ZERO_QUANTITY = new BigDecimal("0.00000000");
     private static final int AMOUNT_SCALE = 2;
     private static final int QUANTITY_SCALE = 8;
+    private static final int RETRY_PENDING_THRESHOLD_MINUTES = 3;
 
     private final MarketMapper marketMapper;
+    private final PointRequestOutboxWriter pointRequestOutboxWriter;
 
     @Transactional
-    public SettlementPreparation prepareSettlement(long marketId) {
+    public SettlementPreparation prepareSettlement(long marketId, boolean publishPointRequests) {
         LocalDateTime now = LocalDateTime.now();
         if (marketMapper.startSettlement(marketId, now) != 1) {
             throwSettlementStartError(marketId);
@@ -116,6 +119,10 @@ public class MarketSettlementTransactionService {
             marketMapper.completeMarketSettlement(settlement.getId(), now);
             marketMapper.completeMarket(marketId, now);
             createReputationUpdateTasksForSettledMarket(marketId, now);
+        } else if (publishPointRequests) {
+            // async: 승자 지급 요청은 outbox로, 패자 처리는 MP와 무관하므로 준비 트랜잭션에서 끝낸다 (ASYNC_POINT_FLOW.md §14 S1)
+            pointRequestOutboxWriter.appendSettlementPayoutRequests(marketId, savedDetails, MarketSettlementService.REASON, now);
+            marketMapper.settleLoserPredictions(marketId, market.getResultOptionId(), now);
         }
 
         return new SettlementPreparation(
@@ -212,11 +219,11 @@ public class MarketSettlementTransactionService {
 
     @Transactional(readOnly = true)
     public List<Long> selectMarketIdsForSettlementRetry(int limit) {
-        return marketMapper.selectMarketIdsForSettlementRetry(limit);
+        return marketMapper.selectMarketIdsForSettlementRetry(pendingThreshold(LocalDateTime.now()), limit);
     }
 
     @Transactional
-    public SettlementRetryPreparation prepareSettlementRetry(long marketId) {
+    public SettlementRetryPreparation prepareSettlementRetry(long marketId, boolean publishPointRequests) {
         LocalDateTime now = LocalDateTime.now();
         Market market = marketMapper.lockMarketById(marketId);
         if (market == null) {
@@ -240,7 +247,14 @@ public class MarketSettlementTransactionService {
             throw new CustomException(MarketErrorCode.MARKET_INVALID_SETTLEMENT_DATA);
         }
 
-        List<MarketSettlementDetail> retryDetails = marketMapper.selectRetryableSettlementDetails(settlement.getId());
+        // 정산 준비 커밋 후 Member-Point 호출 전에 중단된 경우 패자가 CONFIRMED로 남아 있다.
+        // CONFIRMED 패자만 갱신하므로 정상 흐름에서는 변화가 없다 (ASYNC_POINT_FLOW.md §14 S3).
+        marketMapper.settleLoserPredictions(marketId, settlement.getResultOptionId(), now);
+
+        List<MarketSettlementDetail> retryDetails = marketMapper.selectRetryableSettlementDetails(
+                settlement.getId(),
+                pendingThreshold(now)
+        );
         long nonSuccessCount = marketMapper.countNonSuccessSettlementDetails(settlement.getId());
         if (retryDetails.isEmpty()) {
             if (nonSuccessCount == 0) {
@@ -252,7 +266,63 @@ public class MarketSettlementTransactionService {
             throw new CustomException(MarketErrorCode.MARKET_INVALID_SETTLEMENT_DATA);
         }
 
+        if (publishPointRequests) {
+            // async 수동 재시도(R5): 같은 item 멱등성 키 + 새 eventId로 outbox에 다시 기록한다.
+            for (MarketSettlementDetail detail : retryDetails) {
+                markRetryDetail(detail, TransactionItemStatus.PENDING, null, now);
+            }
+            pointRequestOutboxWriter.appendSettlementPayoutRequests(
+                    marketId,
+                    retryDetails,
+                    MarketSettlementService.RETRY_REASON,
+                    now
+            );
+            marketMapper.touchMarketSettlement(settlement.getId(), now);
+        }
         return toRetryPreparation(marketId, settlement, retryDetails, false);
+    }
+
+    /**
+     * Member-Point 결과 이벤트(memberpoint.point-results)를 정산 detail에 반영한다.
+     * SUCCESS는 종결 상태이므로 SQL 가드로 다시 바뀌지 않는다 (ASYNC_POINT_FLOW.md §14).
+     */
+    @Transactional
+    public PointResultApplyOutcome applyAsyncSettlementResult(
+            long marketId,
+            String idempotencyKey,
+            boolean credited,
+            String errorCode
+    ) {
+        LocalDateTime now = LocalDateTime.now();
+        // 락 순서: market → detail → market_settlement (prepareSettlement / prepareSettlementRetry와 동일)
+        if (marketMapper.lockMarketById(marketId) == null) {
+            return PointResultApplyOutcome.DETAIL_NOT_FOUND;
+        }
+        MarketSettlementDetail detail = marketMapper.selectSettlementDetailByIdempotencyKeyForUpdate(idempotencyKey);
+        if (detail == null) {
+            return PointResultApplyOutcome.DETAIL_NOT_FOUND;
+        }
+
+        int updatedRows = credited
+                ? marketMapper.updateRetrySettlementDetailStatus(detail.getId(), TransactionItemStatus.SUCCESS, null, now)
+                : marketMapper.updateRetrySettlementDetailStatus(
+                        detail.getId(),
+                        TransactionItemStatus.FAILED,
+                        failureReason(errorCode, "MEMBER_POINT_FAILED"),
+                        now
+                );
+        if (credited && updatedRows == 1) {
+            marketMapper.settlePrediction(detail.getPredictionId(), detail.getSettledAmount(), now);
+        }
+
+        if (marketMapper.countNonSuccessSettlementDetails(detail.getSettlementId()) == 0) {
+            marketMapper.completeMarketSettlement(detail.getSettlementId(), now);
+            marketMapper.completeMarket(marketId, now);
+            createReputationUpdateTasksForSettledMarket(marketId, now);
+        } else {
+            marketMapper.touchMarketSettlement(detail.getSettlementId(), now);
+        }
+        return updatedRows == 1 ? PointResultApplyOutcome.APPLIED : PointResultApplyOutcome.SKIPPED;
     }
 
     @Transactional
@@ -302,7 +372,10 @@ public class MarketSettlementTransactionService {
         }
 
         marketMapper.touchMarketSettlement(preparation.settlementId(), now);
-        int remainingRetryableCount = Math.toIntExact(marketMapper.countRetryableSettlementDetails(preparation.settlementId()));
+        int remainingRetryableCount = Math.toIntExact(marketMapper.countRetryableSettlementDetails(
+                preparation.settlementId(),
+                pendingThreshold(now)
+        ));
         return preparation.toResponse(
                 MarketStatus.SETTLEMENT_IN_PROGRESS,
                 SettlementStatus.IN_PROGRESS,
@@ -318,7 +391,10 @@ public class MarketSettlementTransactionService {
             markRetryDetail(detail, TransactionItemStatus.UNKNOWN, failReason, now);
         }
         marketMapper.touchMarketSettlement(preparation.settlementId(), now);
-        int remainingRetryableCount = Math.toIntExact(marketMapper.countRetryableSettlementDetails(preparation.settlementId()));
+        int remainingRetryableCount = Math.toIntExact(marketMapper.countRetryableSettlementDetails(
+                preparation.settlementId(),
+                pendingThreshold(now)
+        ));
         return preparation.toResponse(
                 MarketStatus.SETTLEMENT_IN_PROGRESS,
                 SettlementStatus.IN_PROGRESS,
@@ -473,5 +549,10 @@ public class MarketSettlementTransactionService {
     private String failureReason(String reason, String fallback) {
         String value = reason == null || reason.isBlank() ? fallback : reason;
         return value.length() <= 255 ? value : value.substring(0, 255);
+    }
+
+    /** 이 시각 이전에 갱신된 PENDING detail은 정체로 보고 재시도 대상에 포함한다 (환불과 같은 기준, §14 S3). */
+    private LocalDateTime pendingThreshold(LocalDateTime now) {
+        return now.minusMinutes(RETRY_PENDING_THRESHOLD_MINUTES);
     }
 }

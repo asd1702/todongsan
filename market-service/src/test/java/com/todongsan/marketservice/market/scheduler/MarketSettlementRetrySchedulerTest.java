@@ -5,8 +5,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.todongsan.marketservice.global.config.PointTransportProperties;
 import com.todongsan.marketservice.market.dto.response.RetrySettlementBatchResponse;
 import com.todongsan.marketservice.market.service.MarketSettlementService;
+import com.todongsan.marketservice.market.type.PointTransportMode;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -54,8 +56,24 @@ class MarketSettlementRetrySchedulerTest {
         verify(marketSettlementService, never()).retryFailedSettlements(50);
     }
 
+    @Test
+    void runSkipsWhenPointTransportIsAsync() {
+        MarketSettlementRetryScheduler scheduler = new MarketSettlementRetryScheduler(
+                marketSettlementService,
+                new PointTransportProperties(PointTransportMode.ASYNC, null)
+        );
+        ReflectionTestUtils.setField(scheduler, "limit", 50);
+
+        scheduler.run();
+
+        verify(marketSettlementService, never()).retryFailedSettlements(50);
+    }
+
     private MarketSettlementRetryScheduler scheduler(int limit) {
-        MarketSettlementRetryScheduler scheduler = new MarketSettlementRetryScheduler(marketSettlementService);
+        MarketSettlementRetryScheduler scheduler = new MarketSettlementRetryScheduler(
+                marketSettlementService,
+                new PointTransportProperties(null, null)
+        );
         ReflectionTestUtils.setField(scheduler, "limit", limit);
         return scheduler;
     }

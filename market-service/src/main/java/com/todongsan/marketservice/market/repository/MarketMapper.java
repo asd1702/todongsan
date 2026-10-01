@@ -250,15 +250,24 @@ public interface MarketMapper {
 
     List<MarketSettlementDetail> selectSettlementDetailsBySettlementId(@Param("settlementId") long settlementId);
 
-    List<MarketSettlementDetail> selectRetryableSettlementDetails(@Param("settlementId") long settlementId);
+    List<MarketSettlementDetail> selectRetryableSettlementDetails(
+            @Param("settlementId") long settlementId,
+            @Param("pendingThreshold") LocalDateTime pendingThreshold
+    );
 
-    List<Long> selectMarketIdsForSettlementRetry(@Param("limit") int limit);
+    List<Long> selectMarketIdsForSettlementRetry(
+            @Param("pendingThreshold") LocalDateTime pendingThreshold,
+            @Param("limit") int limit
+    );
 
     long countSettlementDetailsBySettlementId(@Param("settlementId") long settlementId);
 
     long countNonSuccessSettlementDetails(@Param("settlementId") long settlementId);
 
-    long countRetryableSettlementDetails(@Param("settlementId") long settlementId);
+    long countRetryableSettlementDetails(
+            @Param("settlementId") long settlementId,
+            @Param("pendingThreshold") LocalDateTime pendingThreshold
+    );
 
     long countSettledLoserPredictions(
             @Param("marketId") long marketId,
@@ -431,4 +440,6 @@ public interface MarketMapper {
     int insertMarketOutboxEvents(@Param("events") List<MarketOutboxEvent> events);
 
     MarketRefundDetail selectRefundDetailByIdempotencyKeyForUpdate(@Param("idempotencyKey") String idempotencyKey);
+
+    MarketSettlementDetail selectSettlementDetailByIdempotencyKeyForUpdate(@Param("idempotencyKey") String idempotencyKey);
 }

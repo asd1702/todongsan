@@ -15,7 +15,7 @@ import java.nio.file.Path;
 import java.util.Set;
 
 /** 루트 contracts/events 스키마로 이벤트 payload를 검증한다. */
-final class EventContract {
+public final class EventContract {
 
     private static final Path CONTRACTS_DIR = Path.of("..", "contracts", "events");
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
@@ -26,7 +26,7 @@ final class EventContract {
         this.schema = schema;
     }
 
-    static EventContract load(String fileName) {
+    public static EventContract load(String fileName) {
         JsonSchemaFactory factory = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012);
         SchemaValidatorsConfig config = SchemaValidatorsConfig.builder()
                 .formatAssertionsEnabled(true)
@@ -38,7 +38,7 @@ final class EventContract {
         }
     }
 
-    Set<ValidationMessage> validate(String json) {
+    public Set<ValidationMessage> validate(String json) {
         try {
             JsonNode node = OBJECT_MAPPER.readTree(json);
             return schema.validate(node);

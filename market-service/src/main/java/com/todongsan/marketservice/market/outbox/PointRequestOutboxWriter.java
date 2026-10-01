@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.todongsan.marketservice.global.config.PointTransportProperties;
 import com.todongsan.marketservice.market.entity.MarketOutboxEvent;
 import com.todongsan.marketservice.market.entity.MarketRefundDetail;
+import com.todongsan.marketservice.market.entity.MarketSettlementDetail;
 import com.todongsan.marketservice.market.repository.MarketMapper;
 import com.todongsan.marketservice.market.type.PointRequestEventType;
 import com.todongsan.marketservice.market.type.PointRequestKeyStrategy;
@@ -53,6 +54,32 @@ public class PointRequestOutboxWriter {
                                 detail.getPredictionId(),
                                 detail.getMemberId(),
                                 amount(detail.getRefundAmount()),
+                                REFERENCE_TYPE,
+                                detail.getPredictionId(),
+                                reason,
+                                detail.getIdempotencyKey()
+                        ),
+                        occurredAt
+                ))
+                .toList();
+        marketMapper.insertMarketOutboxEvents(events);
+    }
+
+    public void appendSettlementPayoutRequests(
+            long marketId,
+            List<MarketSettlementDetail> details,
+            String reason,
+            LocalDateTime now
+    ) {
+        LocalDateTime occurredAt = now.truncatedTo(ChronoUnit.MILLIS);
+        List<MarketOutboxEvent> events = details.stream()
+                .map(detail -> toEvent(
+                        PointRequestEventType.MARKET_SETTLEMENT_PAYOUT_REQUESTED,
+                        new PointRequestData(
+                                marketId,
+                                detail.getPredictionId(),
+                                detail.getMemberId(),
+                                amount(detail.getSettledAmount()),
                                 REFERENCE_TYPE,
                                 detail.getPredictionId(),
                                 reason,

@@ -1178,7 +1178,13 @@
         SELECT *
         FROM market_settlement_detail
         WHERE settlement_id = #{settlementId}
-          AND status IN ('FAILED', 'UNKNOWN')
+          AND (
+                status IN ('FAILED', 'UNKNOWN')
+                OR (
+                    status = 'PENDING'
+                    AND updated_at &lt;= #{pendingThreshold}
+                )
+          )
         ORDER BY id ASC
         FOR UPDATE
     </select>
@@ -1193,7 +1199,13 @@
         WHERE market.status = 'SETTLEMENT_IN_PROGRESS'
           AND market.deleted_at IS NULL
           AND market_settlement.status = 'IN_PROGRESS'
-          AND market_settlement_detail.status IN ('FAILED', 'UNKNOWN')
+          AND (
+                market_settlement_detail.status IN ('FAILED', 'UNKNOWN')
+                OR (
+                    market_settlement_detail.status = 'PENDING'
+                    AND market_settlement_detail.updated_at &lt;= #{pendingThreshold}
+                )
+          )
         GROUP BY market_settlement.market_id
         ORDER BY MIN(market_settlement.updated_at) ASC, MIN(market_settlement.id) ASC
         LIMIT #{limit}
@@ -1216,7 +1228,13 @@
         SELECT COUNT(*)
         FROM market_settlement_detail
         WHERE settlement_id = #{settlementId}
-          AND status IN ('FAILED', 'UNKNOWN')
+          AND (
+                status IN ('FAILED', 'UNKNOWN')
+                OR (
+                    status = 'PENDING'
+                    AND updated_at &lt;= #{pendingThreshold}
+                )
+          )
     </select>
 
     <select id="countSettledLoserPredictions" resultType="long">
@@ -1252,7 +1270,7 @@
             fail_reason = #{failReason},
             updated_at = #{updatedAt}
         WHERE id = #{detailId}
-          AND status IN ('FAILED', 'UNKNOWN')
+          AND status IN ('FAILED', 'UNKNOWN', 'PENDING')
     </update>
 
     <update id="settlePrediction">
@@ -1445,7 +1463,8 @@
             'SETTLEMENT' AS problem_type,
             SUM(CASE WHEN msd.status = 'FAILED' THEN 1 ELSE 0 END) AS failed_count,
             SUM(CASE WHEN msd.status = 'UNKNOWN' THEN 1 ELSE 0 END) AS unknown_count,
-            0 AS pending_stale_count,
+            SUM(CASE WHEN msd.status = 'PENDING' AND msd.updated_at &lt;= #{pendingThreshold} THEN 1 ELSE 0 END)
+                AS pending_stale_count,
             NULL AS last_error_code,
             MAX(msd.fail_reason) AS last_error_message,
             MAX(msd.updated_at) AS last_attempt_at
@@ -1455,7 +1474,10 @@
         WHERE m.deleted_at IS NULL
           AND m.status = 'SETTLEMENT_IN_PROGRESS'
           AND ms.status = 'IN_PROGRESS'
-          AND msd.status IN ('FAILED', 'UNKNOWN')
+          AND (
+                msd.status IN ('FAILED', 'UNKNOWN')
+                OR (msd.status = 'PENDING' AND msd.updated_at &lt;= #{pendingThreshold})
+          )
         GROUP BY m.id, m.title, m.status
 
         UNION ALL
@@ -1599,6 +1621,13 @@
     <select id="selectRefundDetailByIdempotencyKeyForUpdate" resultType="com.todongsan.marketservice.market.entity.MarketRefundDetail">
         SELECT *
         FROM market_refund_detail
+        WHERE idempotency_key = #{idempotencyKey}
+        FOR UPDATE
+    </select>
+
+    <select id="selectSettlementDetailByIdempotencyKeyForUpdate" resultType="com.todongsan.marketservice.market.entity.MarketSettlementDetail">
+        SELECT *
+        FROM market_settlement_detail
         WHERE idempotency_key = #{idempotencyKey}
         FOR UPDATE
     </select>

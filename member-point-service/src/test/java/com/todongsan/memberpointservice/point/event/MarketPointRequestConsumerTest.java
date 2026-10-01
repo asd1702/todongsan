@@ -16,15 +16,20 @@ import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/** 적립 요청 배치 처리 흐름 (ASYNC_POINT_FLOW.md §17, 실패 처리는 §16.1과 같다). */
 @ExtendWith(MockitoExtension.class)
 class MarketPointRequestConsumerTest {
 
@@ -53,6 +58,9 @@ class MarketPointRequestConsumerTest {
             """;
 
     @Mock
+    MarketPointCreditBatchApplier batchApplier;
+
+    @Mock
     MarketPointRequestService marketPointRequestService;
 
     @Mock
@@ -62,93 +70,69 @@ class MarketPointRequestConsumerTest {
 
     @BeforeEach
     void setUp() {
-        consumer = new MarketPointRequestConsumer(new ObjectMapper(), marketPointRequestService, jdbcTemplate);
+        consumer = new MarketPointRequestConsumer(new ObjectMapper(), batchApplier, marketPointRequestService, jdbcTemplate);
     }
 
     @Test
-    void 환불_요청_이벤트를_REFUND_MARKET_적립으로_처리한다() throws Exception {
-        stubProcessed();
+    void 환불_요청을_REFUND_MARKET_적립으로_배치_처리한다() {
+        stubBatchProcessed();
 
-        consumer.consumeRefund(record(REFUND_EVENT));
+        consumer.consumeRefund(records(REFUND_TOPIC, REFUND_EVENT));
 
-        ArgumentCaptor<MarketPointRequestEvent> captor = ArgumentCaptor.forClass(MarketPointRequestEvent.class);
-        verify(marketPointRequestService).process(captor.capture(), eq(PointHistoryType.REFUND_MARKET));
-        MarketPointRequestEvent.Data data = captor.getValue().data();
-        assertThat(captor.getValue().eventId()).isEqualTo("7f1c2a9e-4b0d-4c5e-9a51-2f7b3c8d1e04");
+        MarketPointCreditBatchApplier.Item item = appliedItems().get(0);
+        assertThat(item.type()).isEqualTo(PointHistoryType.REFUND_MARKET);
+        MarketPointRequestEvent.Data data = item.event().data();
+        assertThat(item.event().eventId()).isEqualTo("7f1c2a9e-4b0d-4c5e-9a51-2f7b3c8d1e04");
         assertThat(data.marketId()).isEqualTo(42L);
         assertThat(data.predictionId()).isEqualTo(7L);
         assertThat(data.memberId()).isEqualTo(1001L);
         assertThat(data.amount()).isEqualByComparingTo(new BigDecimal("300.00"));
-        assertThat(data.referenceType()).isEqualTo("MARKET_PREDICTION");
-        assertThat(data.referenceId()).isEqualTo(7L);
-        assertThat(data.reason()).isEqualTo("Market 무효 처리 환불");
         assertThat(data.idempotencyKey()).isEqualTo("MARKET_REFUND:market:42:prediction:7:member:1001");
     }
 
     @Test
-    void 정산_지급_요청_이벤트는_SETTLE_MARKET_적립으로_처리한다() throws Exception {
-        stubProcessed();
+    void 정산_지급_요청은_SETTLE_MARKET_적립으로_배치_처리한다() {
+        stubBatchProcessed();
 
-        consumer.consumeSettlementPayout(record(PAYOUT_TOPIC, payoutEvent()));
+        consumer.consumeSettlementPayout(records(PAYOUT_TOPIC, payoutEvent(7), payoutEvent(8)));
 
-        verify(marketPointRequestService).process(any(), eq(PointHistoryType.SETTLE_MARKET));
+        assertThat(appliedItems()).extracting(MarketPointCreditBatchApplier.Item::type)
+                .containsExactly(PointHistoryType.SETTLE_MARKET, PointHistoryType.SETTLE_MARKET);
+    }
+
+    @Test
+    void 모르는_선택_필드는_무시한다() {
+        stubBatchProcessed();
+        String event = REFUND_EVENT.replace("\"producer\": \"market-service\",",
+                "\"producer\": \"market-service\", \"traceId\": \"abc\",");
+
+        consumer.consumeRefund(records(REFUND_TOPIC, event));
+
+        assertThat(appliedItems()).hasSize(1);
     }
 
     @Test
     void 토픽과_다른_업무의_이벤트는_재시도하지_않는다() {
-        assertThatThrownBy(() -> consumer.consumeRefund(record(REFUND_TOPIC, payoutEvent())))
-                .isInstanceOf(NonRetryableEventException.class)
-                .hasMessageContaining("MARKET_SETTLEMENT_PAYOUT_REQUESTED")
-                .hasMessageContaining(REFUND_TOPIC);
-        assertThatThrownBy(() -> consumer.consumeSettlementPayout(record(PAYOUT_TOPIC, REFUND_EVENT)))
-                .isInstanceOf(NonRetryableEventException.class)
-                .hasMessageContaining("MARKET_REFUND_REQUESTED")
-                .hasMessageContaining(PAYOUT_TOPIC);
-        verifyNotProcessed();
-    }
-
-    private static String payoutEvent() {
-        return REFUND_EVENT
-                .replace("MARKET_REFUND_REQUESTED", "MARKET_SETTLEMENT_PAYOUT_REQUESTED")
-                .replace("MARKET_REFUND:", "MARKET_SETTLEMENT_REWARD:");
-    }
-
-    @Test
-    void 모르는_선택_필드는_무시한다() throws Exception {
-        stubProcessed();
-        String event = REFUND_EVENT.replace("\"producer\": \"market-service\",",
-                "\"producer\": \"market-service\", \"traceId\": \"abc\",");
-
-        consumer.consumeRefund(record(event));
-
-        verify(marketPointRequestService).process(any(), eq(PointHistoryType.REFUND_MARKET));
+        assertNonRetryableAt(() -> consumer.consumeRefund(records(REFUND_TOPIC, payoutEvent(7))), 0, "MARKET_SETTLEMENT_PAYOUT_REQUESTED");
+        assertNonRetryableAt(() -> consumer.consumeSettlementPayout(records(PAYOUT_TOPIC, REFUND_EVENT)), 0, "MARKET_REFUND_REQUESTED");
+        verify(batchApplier, never()).applyBatch(any());
     }
 
     @Test
     void 모르는_eventType은_재시도하지_않는다() {
         String event = REFUND_EVENT.replace("MARKET_REFUND_REQUESTED", "MARKET_SPEND_REQUESTED");
-
-        assertThatThrownBy(() -> consumer.consumeRefund(record(event)))
-                .isInstanceOf(NonRetryableEventException.class)
-                .hasMessageContaining("MARKET_SPEND_REQUESTED");
-        verifyNotProcessed();
+        assertNonRetryableAt(() -> consumer.consumeRefund(records(REFUND_TOPIC, event)), 0, "MARKET_SPEND_REQUESTED");
     }
 
     @Test
     void 지원하지_않는_schemaVersion은_재시도하지_않는다() {
         String event = REFUND_EVENT.replace("\"schemaVersion\": 1", "\"schemaVersion\": 2");
-
-        assertThatThrownBy(() -> consumer.consumeRefund(record(event)))
-                .isInstanceOf(NonRetryableEventException.class)
-                .hasMessageContaining("schemaVersion=2");
-        verifyNotProcessed();
+        assertNonRetryableAt(() -> consumer.consumeRefund(records(REFUND_TOPIC, event)), 0, "schemaVersion=2");
     }
 
     @Test
     void 깨진_JSON은_재시도하지_않는다() {
-        assertThatThrownBy(() -> consumer.consumeRefund(record("{not-json")))
-                .isInstanceOf(NonRetryableEventException.class);
-        verifyNotProcessed();
+        assertNonRetryableAt(() -> consumer.consumeRefund(records(REFUND_TOPIC, "{not-json")), 0, "Malformed");
     }
 
     @Test
@@ -156,58 +140,140 @@ class MarketPointRequestConsumerTest {
         String event = """
                 {"eventId":"7f1c2a9e-4b0d-4c5e-9a51-2f7b3c8d1e04","eventType":"MARKET_REFUND_REQUESTED","schemaVersion":1}
                 """;
-
-        assertThatThrownBy(() -> consumer.consumeRefund(record(event)))
-                .isInstanceOf(NonRetryableEventException.class);
-        verifyNotProcessed();
+        assertNonRetryableAt(() -> consumer.consumeRefund(records(REFUND_TOPIC, event)), 0, "Required field is missing");
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"marketId", "predictionId", "memberId", "amount", "referenceType", "referenceId", "idempotencyKey"})
     void 필수_필드가_없으면_재시도하지_않는다(String field) {
         String event = REFUND_EVENT.replaceAll("(\"" + field + "\": )[^,\\n]+", "$1null");
-
-        assertThatThrownBy(() -> consumer.consumeRefund(record(event)))
-                .isInstanceOf(NonRetryableEventException.class)
-                .hasMessageContaining("Required field is missing");
-        verifyNotProcessed();
+        assertNonRetryableAt(() -> consumer.consumeRefund(records(REFUND_TOPIC, event)), 0, "Required field is missing");
     }
 
     @Test
-    void DB가_살아있는데_처리에_실패하면_그대로_전파해_기본_재시도_후_DLT로_보낸다() {
-        when(marketPointRequestService.process(any(), any())).thenThrow(new IllegalStateException("bad message"));
+    void 처리_불가_건은_빼고_나머지는_반영한_뒤_그_위치를_알린다() {
+        stubBatchProcessed();
 
-        assertThatThrownBy(() -> consumer.consumeRefund(record(REFUND_EVENT)))
-                .isInstanceOf(IllegalStateException.class)
-                .isNotInstanceOf(NonRetryableEventException.class);
+        assertNonRetryableAt(() -> consumer.consumeSettlementPayout(
+                records(PAYOUT_TOPIC, payoutEvent(7), "{not-json", payoutEvent(9))), 1, "Malformed");
+
+        assertThat(appliedItems()).extracting(item -> item.event().data().predictionId()).containsExactly(7L, 9L);
     }
 
     @Test
-    void 처리_실패_후_DB_상태_확인도_실패하면_DB_장애로_알려_복구를_기다리게_한다() {
-        IllegalStateException failure = new IllegalStateException("connection refused");
-        when(marketPointRequestService.process(any(), any())).thenThrow(failure);
-        when(jdbcTemplate.queryForObject("SELECT 1", Integer.class))
-                .thenThrow(new DataAccessResourceFailureException("db down"));
+    void 일시_장애는_배치를_다시_시도하고_건_단위로_내려가지_않는다() {
+        when(batchApplier.applyBatch(any()))
+                .thenThrow(new IllegalStateException("deadlock victim"))
+                .thenReturn(List.of(processed()));
 
-        assertThatThrownBy(() -> consumer.consumeRefund(record(REFUND_EVENT)))
-                .isInstanceOf(DatabaseUnavailableException.class)
-                .hasCause(failure);
-    }
+        consumer.consumeRefund(records(REFUND_TOPIC, REFUND_EVENT));
 
-    private void stubProcessed() {
-        when(marketPointRequestService.process(any(), any()))
-                .thenReturn(BatchItemResult.builder().status("PROCESSED").build());
-    }
-
-    private void verifyNotProcessed() {
+        verify(batchApplier, times(2)).applyBatch(any());
         verify(marketPointRequestService, never()).process(any(), any());
     }
 
-    private ConsumerRecord<String, String> record(String value) {
-        return record(REFUND_TOPIC, value);
+    @Test
+    void 배치가_계속_실패하면_건_단위_경로로_처리한다() {
+        when(batchApplier.applyBatch(any())).thenThrow(new IllegalStateException("persistent"));
+        when(marketPointRequestService.process(any(), any())).thenReturn(processed());
+
+        consumer.consumeSettlementPayout(records(PAYOUT_TOPIC, payoutEvent(7), payoutEvent(8)));
+
+        verify(batchApplier, times(MarketPointRequestConsumer.BATCH_ATTEMPTS)).applyBatch(any());
+        verify(marketPointRequestService, times(2)).process(any(), eq(PointHistoryType.SETTLE_MARKET));
     }
 
-    private ConsumerRecord<String, String> record(String topic, String value) {
-        return new ConsumerRecord<>(topic, 0, 0L, "1001", value);
+    @Test
+    void 원인_건은_건_단위_처리로_골라내고_뒤_건은_다시_전달받는다() {
+        IllegalStateException poison = new IllegalStateException("poison");
+        when(batchApplier.applyBatch(any())).thenThrow(poison);
+        when(marketPointRequestService.process(argThat(event -> event != null && event.data().predictionId() == 8L), any()))
+                .thenThrow(poison);
+        when(marketPointRequestService.process(argThat(event -> event != null && event.data().predictionId() == 7L), any()))
+                .thenReturn(processed());
+
+        assertThatThrownBy(() -> consumer.consumeSettlementPayout(
+                records(PAYOUT_TOPIC, payoutEvent(7), payoutEvent(8), payoutEvent(9))))
+                .isInstanceOfSatisfying(PointRequestRecordFailedException.class, e -> {
+                    assertThat(e.getIndex()).isEqualTo(1);
+                    assertThat(e.getCause()).isSameAs(poison);
+                });
+
+        verify(marketPointRequestService, never()).process(argThat(event -> event != null && event.data().predictionId() == 9L), any());
+    }
+
+    @Test
+    void DB_장애면_남은_재시도와_건_단위_처리_없이_첫_건부터_대기한다() {
+        IllegalStateException outage = new IllegalStateException("connection refused");
+        when(batchApplier.applyBatch(any())).thenThrow(outage);
+        when(jdbcTemplate.queryForObject("SELECT 1", Integer.class))
+                .thenThrow(new DataAccessResourceFailureException("db down"));
+
+        assertThatThrownBy(() -> consumer.consumeSettlementPayout(records(PAYOUT_TOPIC, payoutEvent(7), payoutEvent(8))))
+                .isInstanceOfSatisfying(DatabaseUnavailableException.class, e -> {
+                    assertThat(e.getIndex()).isZero();
+                    assertThat(e.getCause()).isSameAs(outage);
+                });
+
+        verify(batchApplier, times(1)).applyBatch(any());
+        verify(marketPointRequestService, never()).process(any(), any());
+    }
+
+    @Test
+    void 건_단위_처리_중_DB가_죽으면_그_건부터_대기한다() {
+        IllegalStateException failure = new IllegalStateException("failure");
+        when(batchApplier.applyBatch(any())).thenThrow(failure);
+        when(jdbcTemplate.queryForObject("SELECT 1", Integer.class))
+                .thenReturn(1, 1, 1)
+                .thenThrow(new DataAccessResourceFailureException("db down"));
+        when(marketPointRequestService.process(any(), any()))
+                .thenReturn(processed())
+                .thenThrow(failure);
+
+        assertThatThrownBy(() -> consumer.consumeSettlementPayout(records(PAYOUT_TOPIC, payoutEvent(7), payoutEvent(8))))
+                .isInstanceOfSatisfying(DatabaseUnavailableException.class, e -> assertThat(e.getIndex()).isEqualTo(1));
+    }
+
+    private void assertNonRetryableAt(org.assertj.core.api.ThrowableAssert.ThrowingCallable call, int index, String message) {
+        assertThatThrownBy(call)
+                .isInstanceOfSatisfying(PointRequestRecordFailedException.class, e -> {
+                    assertThat(e.getIndex()).isEqualTo(index);
+                    assertThat(e.getCause()).isInstanceOf(NonRetryableEventException.class).hasMessageContaining(message);
+                });
+    }
+
+    private void stubBatchProcessed() {
+        when(batchApplier.applyBatch(any())).thenAnswer(invocation -> {
+            List<MarketPointCreditBatchApplier.Item> items = invocation.getArgument(0);
+            List<BatchItemResult> results = new ArrayList<>();
+            items.forEach(item -> results.add(processed()));
+            return results;
+        });
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<MarketPointCreditBatchApplier.Item> appliedItems() {
+        ArgumentCaptor<List<MarketPointCreditBatchApplier.Item>> captor = ArgumentCaptor.forClass(List.class);
+        verify(batchApplier).applyBatch(captor.capture());
+        return captor.getValue();
+    }
+
+    private static BatchItemResult processed() {
+        return BatchItemResult.builder().status("PROCESSED").build();
+    }
+
+    private static String payoutEvent(long predictionId) {
+        return REFUND_EVENT
+                .replace("MARKET_REFUND_REQUESTED", "MARKET_SETTLEMENT_PAYOUT_REQUESTED")
+                .replace("MARKET_REFUND:market:42:prediction:7", "MARKET_SETTLEMENT_REWARD:market:42:prediction:" + predictionId)
+                .replace("\"predictionId\": 7", "\"predictionId\": " + predictionId);
+    }
+
+    private static List<ConsumerRecord<String, String>> records(String topic, String... values) {
+        List<ConsumerRecord<String, String>> records = new ArrayList<>();
+        for (int i = 0; i < values.length; i++) {
+            records.add(new ConsumerRecord<>(topic, 0, i, "1001", values[i]));
+        }
+        return records;
     }
 }

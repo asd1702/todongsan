@@ -168,3 +168,51 @@
 - 대사 결과: scanned 2 / confirmed 1 / failed 1 / notFound 1. 펜싱 이전에는 A가 `FAILED` 뒤 차감만 남는 경로였다.
 - 조회와 펜싱 사이에 spend가 먼저 커밋되는 경쟁은 E2E로 타이밍을 맞추기 어려워 단위 테스트로 확인했다 (`PointSpendFenceRaceTest`: 펜싱 INSERT가 UNIQUE에 걸리면 먼저 커밋된 `PROCESSED`를 반환). 반대 순서(펜싱이 먼저)는 spend의 INSERT가 UNIQUE에 걸려 같은 트랜잭션의 잔액 차감이 롤백된다.
 - 주의: 재현 중 Windows 셸에서 curl 본문의 한글이 UTF-8로 전송되지 않아 MP가 400대 대신 500(JSON 파싱 실패)을 낸 run 29는 무효 처리했다.
+
+## ⑨ 승자 1만 명 기준값 (MP 배치화 전)
+
+실행일: 2026-10-01 / async + member_id / 파티션 3, 동시성 3 / spend 부하 50 rps / 패자 5,000 / run 2 (`results.csv` label `baseline-10k`)
+시드 확장: ID 대역을 `scripts/bench/settlement/ids.sh`로 모으고 회원 15,000명, run당 예측 19,999건까지 지원.
+
+| 구간 | 시간 |
+|---|---|
+| ① 정산 시작 API (detail·outbox 1만 건) | 2.4초 |
+| ② MP 입금 완료 | **109.1초** |
+| ③ Market 완료 판정 | 109.7초 (② 뒤 0.6초) |
+| 정산 중 spend p95 / 실패 | 52ms / 0 |
+| MP 커밋 / Market 커밋 | 13,000 (spend 약 3,000 포함) / 429 |
+| 정합성 | verify PASS |
+
+MP 문장별 누적 (`events_statements_summary_by_digest`):
+
+| 문장 | 횟수 | 평균 | 누적 |
+|---|---|---|---|
+| COMMIT | 12,918 | 22.9ms | 296초 |
+| 이력 INSERT | 12,972 | 0.45ms | 5.9초 |
+| 회원 SELECT (2종) | 약 26,000 | 0.12~0.15ms | 3.3초 |
+| 잔액 UPDATE (적립) | 9,954 | 0.26ms | 2.6초 |
+| outbox INSERT | 9,981 | 0.25ms | 2.4초 |
+| 기존 이력 SELECT | 12,961 | 0.15ms | 2.0초 |
+| `SET autocommit` | 25,966 | 0.07ms | 1.8초 |
+
+- 1,000명 결과를 10배 한 추정(150초)보다 짧다. 실측으로 기준을 바꾼다.
+- 적립 1건 ≈ 33ms (스레드 1개) = 커밋 23ms + SQL 1.5ms + 나머지 약 8ms (앱↔DB 왕복 약 9회 등). 락 대기 3건, 데드락 0 → 경합이 아니라 커밋·왕복이 병목.
+- 설계: `ASYNC_POINT_FLOW.md` §17.
+
+## ⑩ MP 적립 배치화 (§17) — 1차 결과
+
+실행일: 2026-10-01 / ⑨와 같은 조건 / `max.poll.records` 100 / run 4, 5 (`results.csv` label `mpbatch100-10k`)
+
+| 구간 | ⑨ 배치 전 | run 4 | run 5 |
+|---|---|---|---|
+| ② MP 입금 완료 | 109.1초 | **6.3초** | **6.7초** |
+| ③ Market 완료 판정 | 109.7초 | 68.1초 | 68.0초 |
+| MP 커밋 (spend 부하 약 3,000 포함) | 13,000 | 3,106 | — |
+| 정산 중 spend p95 | 52ms | 65ms | 239ms |
+| 정합성 | PASS | PASS | PASS |
+
+- MP는 약 17배 빨라졌다. 이력·outbox INSERT가 각 1만 회 → 107회 (`rewriteBatchedStatements`로 여러 행 INSERT).
+- **병목이 Market 결과 반영으로 이동했다.** 결과 key가 `market_id`(D5)라 한 마켓의 결과 1만 건을 thread 1개가 처리한다 (초당 약 160건).
+  Market DB 실행 시간은 약 13초인데 실제 62초가 걸렸다. 결과 1건당 왕복 약 5회(detail 잠금 조회, detail UPDATE, 예측 UPDATE, 드라이버의 `SELECT @@SESSION.transaction_read_only` 2회)가 원인이다.
+- spend p95가 run마다 크게 다르다 (65 / 239ms). 배치 트랜잭션이 최대 100명의 회원 row를 잠그는 동안 그 회원의 spend가 기다린다. 배치 크기별 반복 측정으로 정한다 (§17.4 M7).
+- 정확성: 배치 경로와 건 단위 경로의 동등성 테스트(`MarketPointCreditBatchEquivalenceTest`). 누적 스냅샷 제거, 기존 키 조회 제거 두 변형을 모두 잡아내는 것을 확인했다.

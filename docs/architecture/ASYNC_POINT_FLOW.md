@@ -905,3 +905,77 @@ DLT는 문제 데이터를 격리하는 곳인데 인프라 장애 때문에 쌓
 **poll 간격 제약**: 대기는 consumer thread에서 하므로 한 사이클(시도 ≤30초 + 확인 ≤30초 + 대기 30초 ≈ 90초)이 `max.poll.interval.ms`(5분)보다 짧아야 리밸런스가 없다. 대기 간격을 늘릴 때 이 제약을 지킨다.
 
 **남은 과제**: run 도중 Kafka Connect 정지는 자동 감지되지 않는다 (`health.sh`는 수동·run 전 점검). outbox에 남아 유실은 없지만 지연을 알아채려면 커넥터 상태 경보가 필요하다.
+
+---
+
+## 17. MP 적립 배치화 (1차 구현, 결과 ⑩)
+
+### 17.1 근거
+
+`EXPERIMENT_RESULTS.md` ⑨ 기준값 (승자 1만 명, async + member_id): **MP 입금 완료 109.1초**, Market 완료 판정은 그 뒤 0.6초. 병목은 MP다.
+
+| MP 비용 (적립 1건, 스레드 1개 기준) | 시간 |
+|---|---|
+| COMMIT (redo + binlog fsync) | 22.9ms |
+| SQL 실행 (이력 조회·회원 조회 2·잔액 UPDATE·이력 INSERT·outbox INSERT) | 약 1.5ms |
+| 나머지 (앱↔DB 왕복 약 9회, JPA, Kafka) | 약 8ms |
+| 합계 (109초 × 3 스레드 ÷ 1만) | 약 33ms |
+
+MP 락 대기는 3건, 데드락 0이다. **경합(핫 계정)이 아니라 커밋과 왕복이 병목**이다.
+따라서 배치 트랜잭션(커밋을 여러 건이 나눠 냄)과 JDBC 일괄 실행(왕복을 줄임)을 한 세트로 적용한다.
+
+참고 사례: Modern Treasury(동기/비동기 원장 분리, 비동기 쪽은 배치, 목표 초 단위), TigerBeetle(배치로 fsync·왕복 분산), 넥스트리(JPA → `JdbcTemplate.batchUpdate`).
+TigerBeetle식 데이터 모델(거래만 쌓는 원장)은 **핫 계정 경합**의 해법이다. 우리 적립 경로에는 핫 계정이 없고 spend는 잔액 row로 부족을 즉시 판정해야 하므로 도입하지 않는다.
+플랫폼 수수료·마켓 풀 계정을 복식부기로 관리하며 초당 수천 건을 처리해야 할 때 다시 검토한다.
+
+### 17.2 목표
+
+| 단계 | 내용 | 1만 명 입금 완료 목표 |
+|---|---|---|
+| 1 | 배치 트랜잭션 + JDBC 일괄 실행 | 5초 이내 |
+| 2 | 파티션·listener 동시성 3 → 6~12 | 1초 이내 |
+| 도전 | — | 500ms (MySQL 행 갱신 모델에서는 매우 어려움, 환경 차이 포함) |
+
+정확성이 속도보다 우선이다: **누락 0, 중복 0, 회원별 금액 일치** (`verify.sh`)가 모든 단계의 통과 조건이다.
+
+### 17.3 흐름
+
+```text
+poll (같은 파티션 최대 max.poll.records건, 토픽별 listener 각각)
+① 파싱·타입 검증          → 처리 불가 건 분리 (트랜잭션 전, NonRetryable)
+② 배치 트랜잭션 (JDBC)
+   a. 기존 이력 조회        SELECT ... FROM point_history WHERE idempotency_key IN (...)          왕복 1
+   b. 회원 잠금·잔액 조회   SELECT id, point_balance FROM member WHERE id IN (...) ORDER BY id FOR UPDATE   왕복 1
+   c. 앱에서 받은 순서대로 판정
+        이미 처리(해시 같음) → ALREADY_PROCESSED / 해시 다름 → FAILED(IDEMPOTENCY_KEY_CONFLICT)
+        배치 안 같은 키 중복   → 앞 건 결과를 따라 ALREADY_PROCESSED
+        금액·참조 타입·회원 없음 → FAILED (지금과 같은 errorCode)
+        정상 → 회원별 누적 잔액 += 금액, balance_snapshot = 누적 잔액
+   d. 잔액 UPDATE (회원별 합계 1행, JDBC batch)                                                     왕복 1
+   e. 이력 INSERT (JDBC batch → 여러 행 INSERT)                                                     왕복 1
+   f. 결과 outbox INSERT (JDBC batch)                                                              왕복 1
+   g. COMMIT                                                                                       왕복 1
+③ 처리 불가 건 DLT → offset 커밋
+```
+
+건당 왕복 약 9회 → **배치당 약 7회**. 결과 이벤트(내용·키)는 지금과 같다 (계약 변경 없음).
+
+### 17.4 결정
+
+| # | 주제 | 결정 | 근거 |
+|---|---|---|---|
+| M1 | 실패 처리 | Market §16.1·§16.2와 같다: 배치 재시도 → **건 단위 fallback은 기존 `MarketPointRequestService.process`** → 원인 건만 기존 정책. 실패마다 DB 상태 확인, 장애면 대기 | 건 단위 경로는 이미 검증됨. fallback이 곧 기준 구현이다 |
+| M2 | 구현 수단 | 배치 경로는 `JdbcTemplate` (JPA 우회). 건 단위 경로·spend·조회 API는 그대로 | JPA `save`는 IDENTITY 키 때문에 INSERT를 묶지 못한다 |
+| M3 | JDBC 일괄 실행 | MP datasource에 `rewriteBatchedStatements=true` (Hikari `data-source-properties`) | MySQL Connector/J는 이 옵션이 있어야 batch를 여러 행 INSERT로 보낸다 |
+| M4 | 잠금 | 배치의 회원 row를 **ID 오름차순 `FOR UPDATE`**로 먼저 잠근다 | member_id 키라 다른 스레드의 배치와 회원이 겹치지 않는다. spend는 회원 1행만 잠가 순환 대기가 없다. 그래도 순서는 고정한다 (Market Q5와 같은 규칙) |
+| M5 | 잔액 스냅샷 | 잠근 잔액에서 받은 순서대로 누적 계산. UPDATE는 회원별 합계를 **상대값**(`point_balance + ?`)으로 | 같은 회원이 한 배치에 여러 번 나와도 이력마다 정확한 "처리 후 잔액". 상대값이라 잠금이 빠지는 실수가 있어도 잔액 자체는 틀리지 않는다 |
+| M6 | 중복 | 기존 키를 `IN`으로 먼저 걸러 INSERT. **UNIQUE 제약은 최종 안전장치**로 유지 (위반 시 배치 롤백 → 재시도 → fallback) | 재전달·R5 재기록이 섞여도 이중 적립 없음 |
+| M7 | spend 간섭 | 배치 트랜잭션 동안 해당 회원 row가 잠긴다. 배치 크기(`max.poll.records`)를 10 / 50 / 100으로 바꿔 spend p95와 함께 측정해 정한다 | 간섭 = 배치 트랜잭션 시간. ⑤의 sync 배치(1,000명·약 5초 잠금, spend p95 3.5초)와 같은 일이 생기지 않는지 확인 |
+
+### 17.5 검증
+
+| 종류 | 내용 |
+|---|---|
+| **동등성 테스트** | 같은 이벤트 묶음을 건 단위 경로와 배치 경로로 각각 처리해 DB 상태(잔액, 이력 행, 스냅샷, 상태, outbox payload)가 같은지 비교. 정상·이미 처리·해시 충돌·회원 없음·배치 안 중복·같은 회원 여러 번을 섞는다 |
+| 실패 처리 | poison(이력 INSERT 실패), DB 장애, 처리 불가 건 위치 보고 — Market 테스트와 같은 항목 |
+| E2E | 1만 명: 입금 완료 시간, 커밋 수, spend p95, `verify.sh`. 배치 크기 10 / 50 / 100. 장애 주입(MP DB 장애, poison) |

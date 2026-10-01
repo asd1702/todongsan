@@ -13,6 +13,8 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -41,7 +43,20 @@ public class PointResultOutboxWriter {
     private final ObjectMapper objectMapper;
 
     public void append(MarketPointRequestEvent request, BatchItemResult result) {
+        jdbcTemplate.update(INSERT_SQL, toRow(request, result, LocalDateTime.now(ZONE).truncatedTo(ChronoUnit.MILLIS)));
+    }
+
+    /** 배치 적립의 결과 이벤트를 한 번에 기록한다 (JDBC batch, ASYNC_POINT_FLOW.md §17). requests와 results는 같은 순서다. */
+    public void appendAll(List<MarketPointRequestEvent> requests, List<BatchItemResult> results) {
         LocalDateTime occurredAt = LocalDateTime.now(ZONE).truncatedTo(ChronoUnit.MILLIS);
+        List<Object[]> rows = new ArrayList<>(requests.size());
+        for (int i = 0; i < requests.size(); i++) {
+            rows.add(toRow(requests.get(i), results.get(i), occurredAt));
+        }
+        jdbcTemplate.batchUpdate(INSERT_SQL, rows);
+    }
+
+    private Object[] toRow(MarketPointRequestEvent request, BatchItemResult result, LocalDateTime occurredAt) {
         boolean failed = STATUS_FAILED.equals(result.getStatus());
         String eventId = UUID.randomUUID().toString();
         String eventType = failed ? POINT_CREDIT_FAILED : POINT_CREDITED;
@@ -67,15 +82,14 @@ public class PointResultOutboxWriter {
                 )
         );
 
-        jdbcTemplate.update(
-                INSERT_SQL,
+        return new Object[]{
                 eventId,
                 AGGREGATE_TYPE,
                 String.valueOf(data.marketId()),
                 eventType,
                 toJson(envelope),
                 Timestamp.valueOf(occurredAt)
-        );
+        };
     }
 
     private String toJson(PointResultEnvelope envelope) {

@@ -6,6 +6,10 @@ spring:
     username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
     driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      data-source-properties:
+        # JDBC batch를 여러 행 INSERT 1회로 보낸다. 적립 배치의 DB 왕복을 줄인다 (ASYNC_POINT_FLOW.md §17.4 M3)
+        rewriteBatchedStatements: true
   jpa:
     hibernate:
       ddl-auto: validate
@@ -23,6 +27,8 @@ spring:
     consumer:
       group-id: member-point-service
       auto-offset-reset: earliest
+      # 적립 배치 크기 상한. 배치 트랜잭션 동안 해당 회원 row가 잠기므로 spend 간섭과 함께 정한다 (ASYNC_POINT_FLOW.md §17.4 M7)
+      max-poll-records: ${KAFKA_MAX_POLL_RECORDS:100}
     listener:
       # 파티션 수(3)와 맞춘다. 실제 병렬도 = min(concurrency, 파티션 수) (ASYNC_POINT_FLOW.md §3.3)
       concurrency: ${KAFKA_LISTENER_CONCURRENCY:3}

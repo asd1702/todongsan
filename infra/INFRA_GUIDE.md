@@ -504,7 +504,11 @@ docker exec -i member-point-mysql mysql -uroot -p<MEMBERPOINT_MYSQL_ROOT_PASSWOR
 #                          MARKET_POINT_RESULTS_CONSUMER_ENABLED=true (기본 false)
 #    member-point-service: MARKET_POINT_REQUESTS_CONSUMER_ENABLED=true (기본 false)
 #    공통:                 KAFKA_BOOTSTRAP_SERVERS=localhost:9092 (컨테이너 내부에서는 kafka:29092)
+#                          KAFKA_LISTENER_CONCURRENCY=3 (기본 3, 파티션 수와 맞춘다)
 ```
+
+파티션 수: 토픽은 브로커 기본값(`KAFKA_NUM_PARTITIONS: 3`)으로 자동 생성된다. 실제 병렬도는 min(listener 동시성 × 인스턴스 수, 파티션 수)이다.
+파티션은 늘리기만 가능하고, 늘리면 key → 파티션 배치가 바뀌어 key 단위 순서 보장이 일시적으로 깨질 수 있다 (`ASYNC_POINT_FLOW.md` §3.3).
 
 | 토픽 | 발행 | 소비 | key |
 |---|---|---|---|

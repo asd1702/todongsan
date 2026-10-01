@@ -1,6 +1,6 @@
 # Market ↔ Member-Point 비동기 포인트 흐름 설계
 
-> 상태: **구현 중** (1~4단계 완료, 5단계 A 운영 정리 완료. 5단계 B 실험, 6단계 펜싱 예정)
+> 상태: **구현 중** (1~4단계 완료, 5단계 A 운영 정리 완료, 5단계 B 실험 준비 중 — 파티션·동시성 정비(D9), seed 설계 확정. 6단계 펜싱 예정)
 > 범위: Market Service ↔ Member-Point Service. Battle / Insight 연계는 이 문서의 범위가 아니다.
 > 상위 원칙: 루트 `AGENTS.md` 섹션 5 "비동기 이벤트 원칙 (DB = SSOT, CDC)"
 
@@ -41,6 +41,7 @@ Feign으로 동기 호출한다. 관리자 요청이 배치 처리 완료까지 
 | D6 | 전송 방식 전환 | 설정으로 `sync` / `async` 전환 가능하게 둔다 | before/after 실험, 롤백 경로 확보 |
 | D7 | 요청 토픽 키 전략 | 실험용으로 `member_id` / `market_id` 전환 가능하게 둔다 | 키 전략별 처리량·lock 경합 비교 |
 | D8 | Consumer 멱등성 | 기존 item 멱등성 키 재사용. inbox 테이블 두지 않음 | 양쪽 모두 UNIQUE 키로 이미 멱등 (§5) |
+| D9 | 파티션 수 · listener 동시성 | 토픽 파티션 **3**, 두 서비스 `spring.kafka.listener.concurrency` **3** (`KAFKA_LISTENER_CONCURRENCY`) | 실제 병렬도 = min(동시성, 파티션 수). D4의 병렬 처리 전제를 만족시키는 최소 설정 (§3.3) |
 
 ### 3.1 이벤트 단위 비교 (회원별 vs 마켓 배치)
 
@@ -75,6 +76,26 @@ outbox row의 키는 발행 측이 정하므로 토픽마다 키를 다르게 �
 |---|---|---|---|
 | `market.point-requests` | Market → MP | `member_id` | MP 회원 잔액 row |
 | `memberpoint.point-results` | MP → Market | `market_id` | Market 정산/무효 row |
+
+### 3.3 병렬 처리와 파티션 수
+
+같은 consumer group 안에서 파티션 하나는 동시에 consumer 하나에게만 배정된다. 따라서 **실제 병렬도 = min(consumer 수, 파티션 수)** 이다.
+consumer 수는 `서비스 인스턴스 수 × listener concurrency`다.
+
+```text
+파티션 3개 기준
+concurrency=1  → thread-1: p0, p1, p2                     병렬도 1
+concurrency=3  → thread-1: p0 / thread-2: p1 / thread-3: p2  병렬도 3
+concurrency=6  → 3개 thread는 배정 없이 대기               병렬도 3
+```
+
+| 항목 | 결정·주의 |
+|---|---|
+| 파티션 수 | 3 (브로커 기본값 `KAFKA_NUM_PARTITIONS: 3`으로 자동 생성). 로컬·실험 규모에 충분 |
+| listener 동시성 | 파티션 수와 같은 3. 더 크게 잡아도 병렬도는 늘지 않는다 |
+| 파티션 증설 | 줄일 수 없다. `hash(key) % 파티션 수`가 바뀌어 같은 key가 다른 파티션으로 가므로, 전환 시점에 key 단위 순서 보장(D4·D5 전제)이 일시적으로 깨질 수 있다. 처음 생성할 때 여유 있게 정한다 |
+| 다른 병목 | 병렬도가 늘어도 MP DB 커넥션 풀(Hikari 기본 10), DB CPU·I/O, 같은 row 락에서 막힌다 |
+| 결과 토픽의 직렬성 | 결과 key가 `market_id`(D5)이므로 **한 마켓의 결과는 한 파티션 → 한 thread에서 순차 처리**된다. 완료 판정 경쟁을 없애려는 의도이며, 대형 마켓 1개 정산에서는 결과 반영이 병목이 될 수 있다 (§15.2 실험에서 요청 처리와 결과 반영 시간을 분리해 확인) |
 
 ---
 
@@ -659,19 +680,77 @@ Feign 동기 경로와 재시도 스케줄러는 실험이 끝날 때까지 유�
 
 ### 15.2 B. 성능 비교 실험
 
+#### 변수
+
 | 변수 | 값 |
 |---|---|
-| 전송 방식 | `sync` (Feign 배치, MP 클라이언트 http 모드) / `async` (CDC) |
+| 전송 방식 | `sync` (Feign 배치) / `async` (CDC). **두 모드 모두 Market의 MP 클라이언트는 http 모드**(`MEMBER_POINT_CLIENT_MODE=http`) |
 | 요청 토픽 키 | `member_id` / `market_id` (async) |
-| 승자 수 N | 100 / 1,000 |
+| 승자 수 N | 100 / 1,000 (패자는 N × 0.5) |
+| 고정 조건 | 파티션 3, listener 동시성 3 (D9), Feign read timeout 기본 5초, 반복 3라운드 |
 
-| 지표 | 의미 |
+#### 지표
+
+| 지표 | 측정 방법 | 의미 |
+|---|---|---|
+| 관리자 API 응답 시간 | 스크립트 측정 | 요청 스레드 점유 시간 |
+| **(a) MP 반영 완료 시간** | 정산 요청 → 지급 이력 N건 생성 | 전송 방식 자체 비교. sync timeout 여부와 무관 |
+| **(b) Market 완료 시간** | 정산 요청 → `market.status = SETTLED` | sync에서 Feign timeout(5초)이 나면 `UNKNOWN` → 재시도 스케줄러(3분) 이후 완료되므로 timeout 발생 여부와 함께 기록 |
+| MP 락 대기·데드락 | `Innodb_row_lock_waits`, `Innodb_row_lock_time`, `lock_deadlocks` 전후 차이 | 키 전략·이벤트 단위에 따른 경합 |
+| **정산 중 사용자 `spend` 지연** | k6로 MP `spend` 직접 호출 p50 / p95 / p99. 정산 없는 동일 부하를 기준선으로 측정 | sync 배치는 MP에서 N명의 잔액 row를 한 트랜잭션으로 잡는다 |
+| 장애 복구 | 처리 중 MP 중단 → 재기동 | 유실 0 / 중복 0 |
+
+시간 측정: `point_history.created_at`, `market_settlement_detail.updated_at`은 `DATETIME(0)`(초 단위)이라 1초 미만을 잴 수 없다.
+완료 시간은 **스크립트가 건수를 폴링하며 자기 시계(ms)로** 잰다. `docker exec`를 매번 띄우지 않고 컨테이너 안에서 루프를 돌려 약 50ms 간격으로 폴링하고, 해상도를 결과에 함께 적는다.
+
+async 지연 구성: Debezium MySQL 커넥터는 binlog를 **스트리밍**으로 읽는다 (고정 폴링 주기 없음). async 완료 시간 = (binlog 읽기 + Kafka 전달 + MP 처리) + (binlog 읽기 + Kafka 전달 + Market 반영).
+
+#### 실험 데이터 (seed)
+
+| 항목 | 결정 |
 |---|---|
-| 관리자 API 응답 시간 | 요청 스레드 점유 시간 |
-| 정산 요청 → 전원 완료 시간 | end-to-end 지연 (async는 CDC 2회 포함) |
-| MP 락 대기·데드락 | `Innodb_row_lock_waits`, `Innodb_row_lock_time`, `lock_deadlocks` 전후 차이 |
-| **정산 중 사용자 `spend` 지연** | 정산 대상 회원이 다른 마켓에 동시 예측 참여할 때 p50 / p95. sync 배치는 MP에서 N명의 잔액 row를 한 트랜잭션으로 잡는다 |
-| 장애 복구 | 처리 중 MP 중단 → 재기동 시 유실 0 / 중복 0 |
+| 위치 | 기존 로컬 DB + 전용 ID 대역 (커넥터·Kafka가 이미 연결되어 있음). 별도 컨테이너는 커넥터·binlog·계정을 한 벌 더 구성해야 해서 채택하지 않음 |
+| ID 대역 | **현재 AUTO_INCREMENT보다 작은 빈 대역**을 쓴다. 큰 ID를 직접 넣으면 InnoDB AUTO_INCREMENT가 영구히 밀려 이후 실제 데이터 ID가 오염된다 |
+| 생성 방식 | MySQL 8 `WITH RECURSIVE` 시퀀스로 `INSERT ... SELECT` (세션 `cte_max_recursion_depth` 상향) |
 
-도구: `scripts/bench/settlement/seed.sh`, `run.sh`. 결과: `reports/bench/`, `EXPERIMENT_RESULTS.md` ④.
+| 대상 | ID 대역 | 내용 |
+|---|---|---|
+| MP 회원 풀 | 500,001 ~ 503,000 (3,000명, 1회 생성) | `nickname=bench-{n}`, `oauth_provider=BENCH`, `INSERT IGNORE`. **run마다 잔액 1,000,000으로 초기화** |
+| 정산 마켓 | 800,000 + run | `CLOSED`, 결과 옵션 A, 수수료 5% |
+| 옵션 | 810,000 + run × 2 (+0 결과, +1 패배) | 정산 계산은 옵션 pool 값을 쓰지 않는다 |
+| 예측 | 500,000 + run × 10,000 + i (run당 최대 1만 건, run ≤ 40) | 승자 N(옵션 A), 패자 N × 0.5(옵션 B), 금액 `100 + (n % 10) × 10`, 계약 수량 = 금액 ÷ 0.5 → 기대 지급액을 SQL로 사전 계산 가능 |
+
+AUTO_INCREMENT 기준 (2026-10-01): `market` 900,101, `market_option` 910,102, `market_prediction` 920,103, MP `member` 999,002.
+MP `member`는 3단계 E2E 테스트 회원(999001) 때문에 이미 밀려 있어, 정리 스크립트에서 삭제 후 복구한다.
+
+#### 간섭 부하
+
+| 항목 | 결정 |
+|---|---|
+| 대상 | MP `POST /internal/api/v1/points/spend` 직접 호출 (`/internal/**` permitAll). Market 예측 API를 쓰면 Market 가격 확정 락(마켓 row)이 섞여 MP 잔액 락 경합이 묻힌다 |
+| 도구 | k6 (`grafana/k6` Docker 이미지, `host.docker.internal`로 호출) |
+| 방식 | 승자 회원 중 무작위, 고정 도착률(예: 초당 50건), 요청마다 새 멱등성 키, 1.00P. 정산 전부터 완료 후까지 |
+
+#### 정합성 검증 (run마다)
+
+```text
+Market: 정산 detail SUCCESS = N, market SETTLED, Σ settled_amount + burned_point_amount = settlement_pool, 지급액 = 사전 계산값
+MP:     해당 예측들의 SETTLE_MARKET 이력 = N건 (중복 없음), Σ amount = Σ settled_amount
+```
+
+#### 정리 · 운영 조건
+
+- `cleanup.sh`: 실험 대역의 마켓·옵션·예측·정산·outbox·reputation task, MP 실험 회원의 이력·outbox 삭제. 회원 풀은 유지
+- run 중 신뢰도 업데이트 스케줄러 off (실험과 무관한 Insight 호출 배제)
+- run 시작 전 `scripts/cdc/health.sh`가 exit 0 (lag 0, 미재발행 DLT 0)
+
+도구: `scripts/bench/settlement/seed.sh`, `cleanup.sh`, `run.sh`. 결과: `reports/bench/`, `EXPERIMENT_RESULTS.md` ④.
 해석 한계: 로컬 단일 머신·Docker이므로 절대값보다 상대 비교를 본다. 3라운드 반복으로 안정성을 먼저 확인한다.
+
+### 15.3 실험 준비 중 발견한 사항
+
+| # | 발견 | 반영 |
+|---|---|---|
+| F6 | 두 서비스 모두 `spring.kafka.listener.concurrency`가 없어 **consumer thread 1개가 파티션 3개를 순차 처리**했다. D4(요청 key `member_id`)의 "MP 병렬 처리" 전제가 실제로 성립하지 않았고, key 전략 실험도 차이가 날 수 없었다 (2~4단계 구현의 공백) | 동시성 3 기본값 + `KAFKA_LISTENER_CONCURRENCY`로 변경 가능 (D9, §3.3). 기동 로그에서 thread 3개가 파티션 하나씩 배정되는 것과 정산 스모크 테스트 확인 |
+| F7 | 실험 ID 대역 원안(예측 8,000,000~, 회원 7,000,001~)이 현재 AUTO_INCREMENT보다 커서 개발 DB의 AUTO_INCREMENT를 영구히 밀어낼 수 있었다 | 현재 AUTO_INCREMENT보다 작은 빈 대역으로 변경 (위 표) |
+| F8 | 지급 이력·detail 시각 컬럼이 초 단위라 1초 미만 완료 시간을 DB 시각으로 잴 수 없다. sync는 Feign timeout 시 Market 완료가 재시도 스케줄러(3분)에 걸린다 | 스크립트 폴링(ms) 측정, 완료 시간을 (a) MP 반영 / (b) Market 완료로 분리 |

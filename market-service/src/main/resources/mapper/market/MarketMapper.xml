@@ -1638,6 +1638,17 @@
         FOR UPDATE
     </select>
 
+    <select id="lockSettlementDetailsByIdempotencyKeys" resultType="com.todongsan.marketservice.market.entity.MarketSettlementDetail">
+        SELECT *
+        FROM market_settlement_detail
+        WHERE idempotency_key IN
+        <foreach collection="idempotencyKeys" item="idempotencyKey" open="(" separator="," close=")">
+            #{idempotencyKey}
+        </foreach>
+        ORDER BY idempotency_key
+        FOR UPDATE
+    </select>
+
     <select id="lockMarketsByIdsInOrder" resultType="long">
         SELECT id
         FROM market

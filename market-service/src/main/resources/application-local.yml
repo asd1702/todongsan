@@ -1,7 +1,8 @@
 spring:
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3308}/${DB_MARKET:market}?serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+    # useLocalSessionState: 읽기 전용 상태를 서버에 묻지 않는다 / rewriteBatchedStatements: JDBC batch를 묶어 보낸다 (ASYNC_POINT_FLOW.md §17.6)
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3308}/${DB_MARKET:market}?serverTimezone=Asia/Seoul&characterEncoding=UTF-8&useLocalSessionState=true&rewriteBatchedStatements=true
     username: ${DB_USERNAME:market_user}
     password: ${DB_PASSWORD:market-local-password}
 

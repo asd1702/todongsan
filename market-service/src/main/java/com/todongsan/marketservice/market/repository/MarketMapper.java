@@ -450,4 +450,7 @@ public interface MarketMapper {
 
     /** 여러 market을 ID 오름차순으로 잠근다. 존재하는(삭제되지 않은) market ID를 반환한다. */
     List<Long> lockMarketsByIdsInOrder(@Param("marketIds") List<Long> marketIds);
+
+    /** 결과 배치의 정산 detail을 한 번에 잠근다 (멱등성 키 순서, ASYNC_POINT_FLOW.md §17.6). */
+    List<MarketSettlementDetail> lockSettlementDetailsByIdempotencyKeys(@Param("idempotencyKeys") List<String> idempotencyKeys);
 }

@@ -979,3 +979,16 @@ poll (같은 파티션 최대 max.poll.records건, 토픽별 listener 각각)
 | **동등성 테스트** | 같은 이벤트 묶음을 건 단위 경로와 배치 경로로 각각 처리해 DB 상태(잔액, 이력 행, 스냅샷, 상태, outbox payload)가 같은지 비교. 정상·이미 처리·해시 충돌·회원 없음·배치 안 중복·같은 회원 여러 번을 섞는다 |
 | 실패 처리 | poison(이력 INSERT 실패), DB 장애, 처리 불가 건 위치 보고 — Market 테스트와 같은 항목 |
 | E2E | 1만 명: 입금 완료 시간, 커밋 수, spend p95, `verify.sh`. 배치 크기 10 / 50 / 100. 장애 주입(MP DB 장애, poison) |
+
+### 17.6 Market 결과 반영의 왕복 줄이기 (구현, 결과 ⑪)
+
+MP 배치 뒤 병목이 Market 결과 반영으로 옮겨갔다 (⑩: MP 완료 6초, Market 완료 68초).
+결과 key가 `market_id`(D5)라 한 마켓의 결과는 thread 1개가 처리하고, 결과 1건마다 DB 왕복이 약 5회였다.
+
+| 조치 | 내용 |
+|---|---|
+| 드라이버 설정 | Market DB URL에 `useLocalSessionState=true` (드라이버가 `SELECT @@SESSION.transaction_read_only`를 보내지 않고 상태를 기억), `rewriteBatchedStatements=true`. local / prod 설정 모두 |
+| 정산 결과 묶음 반영 | 배치의 정산 detail을 `IN (...) FOR UPDATE` 1회로 잠그고(멱등성 키 순서), 건 단위 경로와 같은 상태 전이 규칙(FAILED·UNKNOWN·PENDING만 변경, SUCCESS 종결)을 잠근 상태에 받은 순서대로 적용한다. 실제로 바뀌는 detail·예측 UPDATE만 JDBC batch로 보낸다. UPDATE에는 건 단위와 같은 상태 조건을 그대로 둔다 (안전장치) |
+| 환불 | 건수가 적어 건 단위 그대로. 정산과 다른 테이블이라 한 배치에 섞여도 정합성에 영향 없음 |
+
+정확성: `PointResultBatchEquivalenceTest`가 같은 조건의 두 정산 마켓에 같은 결과 순서(성공, 실패→성공, 성공 뒤 늦은 실패, 중복, 없는 키, 완료)를 건 단위·묶음으로 각각 반영해 결과와 DB 상태를 비교한다. 배치 안 상태 이어받기 제거, 예측 갱신 제거 두 변형을 모두 잡아내는 것을 확인했다.

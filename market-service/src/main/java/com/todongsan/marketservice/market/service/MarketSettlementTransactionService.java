@@ -564,7 +564,7 @@ public class MarketSettlementTransactionService {
         return amount.setScale(AMOUNT_SCALE, RoundingMode.DOWN);
     }
 
-    private String failureReason(String reason, String fallback) {
+    static String failureReason(String reason, String fallback) {
         String value = reason == null || reason.isBlank() ? fallback : reason;
         return value.length() <= 255 ? value : value.substring(0, 255);
     }

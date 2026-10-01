@@ -216,3 +216,29 @@ MP 문장별 누적 (`events_statements_summary_by_digest`):
   Market DB 실행 시간은 약 13초인데 실제 62초가 걸렸다. 결과 1건당 왕복 약 5회(detail 잠금 조회, detail UPDATE, 예측 UPDATE, 드라이버의 `SELECT @@SESSION.transaction_read_only` 2회)가 원인이다.
 - spend p95가 run마다 크게 다르다 (65 / 239ms). 배치 트랜잭션이 최대 100명의 회원 row를 잠그는 동안 그 회원의 spend가 기다린다. 배치 크기별 반복 측정으로 정한다 (§17.4 M7).
 - 정확성: 배치 경로와 건 단위 경로의 동등성 테스트(`MarketPointCreditBatchEquivalenceTest`). 누적 스냅샷 제거, 기존 키 조회 제거 두 변형을 모두 잡아내는 것을 확인했다.
+
+## ⑪ Market 결과 반영 왕복 줄이기 (§17.6)
+
+실행일: 2026-10-01 / ⑨⑩과 같은 조건 / run 7, 8 (`results.csv` label `mkbatch-10k`)
+
+| 구간 | ⑩ (run 4 / 5) | run 7 | run 8 |
+|---|---|---|---|
+| ② MP 입금 완료 | 6.3 / 6.7초 | 8.3초 | 6.0초 |
+| ③ Market 완료 판정 | 68.1 / 68.0초 | **15.6초** | **13.3초** |
+| ③ − ② | 약 62초 | 7.2초 | 7.3초 |
+| 정산 중 spend p95 | 65 / 239ms | 63ms | 75ms |
+| 정합성 | PASS | PASS | PASS |
+
+Market 문장별 누적 (run 7 + 8):
+
+| 문장 | 횟수 | 평균 | 누적 |
+|---|---|---|---|
+| COMMIT | 214 | 18.6ms | 4.0초 |
+| detail UPDATE | 20,000 | 0.20ms | 3.9초 |
+| 예측 UPDATE | 20,000 | 0.20ms | 3.9초 |
+| 완료 판정 COUNT | 212 | 7.5ms | 1.6초 |
+| detail 묶음 잠금 (`IN ... FOR UPDATE`) | 212 | 3.9ms | 0.8초 |
+
+- `SELECT @@SESSION.transaction_read_only`는 2만 회 → 0회. detail 잠금 조회는 1만 회 → 배치당 1회.
+- 남은 Market 시간은 대부분 DB 실행 자체다 (배치 1개 ≈ UPDATE 200개 × 0.2ms + COUNT 7.5ms + COMMIT 18.6ms ≈ 70ms). 왕복이 아니라 문장 수가 다음 병목이다.
+- 승자 1만 명 정산 전체: **약 109초 → 약 14초** (②는 약 7초).

@@ -805,15 +805,34 @@ MP:     해당 예측들의 SETTLE_MARKET 이력 = N건 (중복 없음), Σ amou
 
 A가 성립하는 이유: 결과 반영은 SQL 가드(SUCCESS 종결, 상태 조건부 UPDATE)로 건 단위 멱등이므로 여러 건을 한 트랜잭션에 묶어도 정합성 규칙이 바뀌지 않는다. MP 쪽(사용자 간섭에 영향)은 건드리지 않는다.
 
-### 16.1 다음 설계 과제: 배치 안의 실패 처리
+### 16.1 배치 안의 실패 처리 (결정)
 
-원칙(초안): **한 건의 실패가 배치 전체를 무효로 만들지 않는다** (블록 안의 실패 트랜잭션이 블록을 무효로 만들지 않는 것과 같은 방향).
+원칙: **한 건의 실패가 배치 전체를 무효로 만들지 않는다** (블록 안의 실패 트랜잭션이 블록을 무효로 만들지 않는 것과 같은 방향).
 
-| # | 질문 |
+```text
+poll (최대 max.poll.records건)
+① 파싱·검증            → 처리 불가 건 분리 (트랜잭션 전)
+② 배치 트랜잭션         → 배치에 등장한 market을 ID 오름차순으로 선잠금
+                           받은 순서대로 순차 반영 (detail 없음은 예외가 아닌 결과로 수집)
+                           정산·무효마다 완료 판정 1회 → COMMIT 1회
+③ 처리 불가 건 DLT      → DB 커밋 뒤
+④ offset 커밋           → 항상 마지막
+```
+
+| # | 주제 | 결정 |
+|---|---|---|
+| Q1 | 실패 구분 | **처리 불가**(깨진 JSON, 모르는 타입·버전, 필수 필드 누락, detail 없음): 그 건만 DLT, 재시도 없음. **일시 장애**(DB 연결, 락 timeout, 데드락 희생): 배치 재시도 |
+| Q2 | 처리 불가 건 분리 | ① 파싱 단계 실패는 트랜잭션 전에 제외. ② detail 없음은 예외로 롤백하지 않고 결과로 수집해 나머지를 커밋. **순서: DB 커밋 → DLT → offset 커밋.** offset이 마지막이므로 어디서 중단돼도 같은 배치가 다시 오고, 반영은 멱등이라 유실 없음 (DLT 중복은 가능하나 무해) |
+| Q3 | poison pill | 알 수 없는 예외 → 배치 재시도 2회 (짧은 backoff) → 그래도 실패하면 **이 배치만 건 단위 트랜잭션으로 fallback** → 원인 건만 기존 정책(4회 재시도 후 DLT)으로 격리. 진짜 DB 장애는 건 단위에서도 모두 실패하므로 DLT로 보내지 않고 대기 |
+| Q4 | 배치 크기·순서 | `max.poll.records = 100` (`KAFKA_MAX_POLL_RECORDS`). poll은 그 순간 도착한 만큼만 가져오므로 한가할 때 추가 지연 없음. 배치 안에서 **받은 순서대로 순차 반영** (정렬·dedup·병렬 금지) + SUCCESS 종결 가드로 이중 보장. 완료 판정은 배치당, 등장한 정산·무효마다 1회 |
+| Q5 | 락 | 현재 데드락 경로 없음 (market마다 writer 1개, R5는 market 1개만 잠금). 방어로 **배치 시작 시 배치의 market을 ID 오름차순으로 선잠금**, 처리 순서는 받은 순서. 규칙: 여러 market을 잠그는 코드는 ID 오름차순. 배치 트랜잭션 약 0.2초, 사용자 영향 없음 |
+| Q6 | 검증 | 정합성 테스트(배치 반영, 순서, 다중 market, 처리 불가 ①②, poison pill, 진짜 장애, 락 순서) + suite 재실행 before/after (Market 완료 시간, MP→Market 간격, COMMIT 횟수, spend 간섭 불변) + 장애 주입 E2E (DB 트리거 poison pill, `docker pause` DB 일시 장애, MP·consumer 중단) |
+
+구현 수단: Spring Kafka batch listener + `BatchListenerFailedException(index)`. 처리 불가 건이나 poison pill의 위치를 error handler에 알려 주면, 그 앞 건의 offset은 확정되고 해당 건만 기존 `DefaultErrorHandler` 정책(NonRetryable 즉시, 그 외 4회 재시도 후 `LoggingDeadLetterRecoverer`)으로 처리된다. 그 뒤 건은 다시 전달되어 멱등하게 재반영된다.
+
+| 선택 과제 | 내용 |
 |---|---|
-| Q1 | 실패 종류 구분: 처리 불가(깨진 JSON, 모르는 타입, detail 없음) vs 일시 장애(DB 연결, 락 timeout) |
-| Q2 | 처리 불가 건을 트랜잭션 전(파싱·검증) / 트랜잭션 안(detail 없음)에서 각각 어떻게 걸러 DLT로 보낼지, DLT 발행과 DB 커밋의 순서 |
-| Q3 | 일시 장애 시 배치 전체 재시도 → 반복 실패하면 **건 단위 처리로 내려가 원인 건을 격리**할지 (poison pill) |
-| Q4 | 배치 크기(`max.poll.records`)와 지연의 균형, 배치 안 같은 key의 순서(FAILED → SUCCESS) 보장 |
-| Q5 | 배치 트랜잭션 동안 market row 락 보유 시간과 관리자 R5 재시도의 상호작용 |
-| Q6 | 검증: 같은 suite로 before/after 비교 (Market 완료 시간, COMMIT 횟수) + 실패 주입 테스트 |
+| 이분 탐색 fallback | 건 단위 fallback(100건이면 트랜잭션 약 100회) 대신 반으로 나눠 원인 건 탐색(약 14회). poison pill 시나리오에서 격리 비용을 비교 |
+| `max.poll.records` sweep | 50 / 100 / 500 |
+
+검토 후 보류: **이벤트 직렬화를 Avro 등 바이너리로 변경.** JSON 파싱은 이벤트당 수~수십 μs로 추정되어 이벤트당 COMMIT 13ms 대비 0.1% 미만이다. 바이너리 포맷의 주된 이득(메시지 크기, 스키마 진화 강제)은 현재 규모의 병목과 무관하며, Debezium 변환과 Schema Registry 도입 비용이 크다. 스키마 진화 관리(E3)를 강화할 때 다시 검토한다.

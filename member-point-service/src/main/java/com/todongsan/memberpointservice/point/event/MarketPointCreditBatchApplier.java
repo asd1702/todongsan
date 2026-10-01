@@ -1,5 +1,6 @@
 package com.todongsan.memberpointservice.point.event;
 
+import com.todongsan.memberpointservice.global.config.ConsumerDatabase;
 import com.todongsan.memberpointservice.global.exception.ErrorCode;
 import com.todongsan.memberpointservice.global.util.RequestHashUtil;
 import com.todongsan.memberpointservice.point.dto.response.BatchItemResult;
@@ -11,7 +12,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -45,14 +45,19 @@ public class MarketPointCreditBatchApplier {
             """;
     private static final String UPDATE_BALANCE_SQL = "UPDATE member SET point_balance = point_balance + ? WHERE id = ?";
 
-    private final JdbcTemplate jdbcTemplate;
+    private final ConsumerDatabase consumerDatabase;
     private final PointResultOutboxWriter pointResultOutboxWriter;
 
     public record Item(MarketPointRequestEvent event, PointHistoryType type) {
     }
 
-    @Transactional
+    /** consumer 전용 커넥션 풀의 트랜잭션 1개로 처리한다 (§17.7). */
     public List<BatchItemResult> applyBatch(List<Item> items) {
+        return consumerDatabase.transactionTemplate().execute(status -> applyInTransaction(items));
+    }
+
+    private List<BatchItemResult> applyInTransaction(List<Item> items) {
+        JdbcTemplate jdbcTemplate = consumerDatabase.jdbcTemplate();
         Map<String, Recorded> recorded = findExisting(items);
         Map<Long, BigDecimal> balances = lockMembers(items);
         Map<Long, BigDecimal> increments = new LinkedHashMap<>();
@@ -106,14 +111,14 @@ public class MarketPointCreditBatchApplier {
                     .toList());
             jdbcTemplate.batchUpdate(INSERT_HISTORY_SQL, histories);
         }
-        pointResultOutboxWriter.appendAll(items.stream().map(Item::event).toList(), results);
+        pointResultOutboxWriter.appendAll(jdbcTemplate, items.stream().map(Item::event).toList(), results);
         return results;
     }
 
     private Map<String, Recorded> findExisting(List<Item> items) {
         List<String> keys = items.stream().map(item -> item.event().data().idempotencyKey()).distinct().toList();
         Map<String, Recorded> recorded = new HashMap<>();
-        new NamedParameterJdbcTemplate(jdbcTemplate).query("""
+        new NamedParameterJdbcTemplate(consumerDatabase.jdbcTemplate()).query("""
                         SELECT idempotency_key, request_hash, amount, balance_snapshot
                         FROM point_history WHERE idempotency_key IN (:keys)
                         """,
@@ -129,7 +134,7 @@ public class MarketPointCreditBatchApplier {
     private Map<Long, BigDecimal> lockMembers(List<Item> items) {
         List<Long> memberIds = items.stream().map(item -> item.event().data().memberId()).distinct().sorted().toList();
         Map<Long, BigDecimal> balances = new HashMap<>();
-        new NamedParameterJdbcTemplate(jdbcTemplate).query(
+        new NamedParameterJdbcTemplate(consumerDatabase.jdbcTemplate()).query(
                 "SELECT id, point_balance FROM member WHERE id IN (:ids) ORDER BY id FOR UPDATE",
                 new MapSqlParameterSource("ids", memberIds),
                 rs -> {

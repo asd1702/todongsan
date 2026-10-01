@@ -4,6 +4,7 @@
 #   ./scripts/bench/settlement/fault.sh poison <run> <i>   # run의 i번째 승자 정산 detail을 갱신하면 SQL 오류 (poison pill)
 #   ./scripts/bench/settlement/fault.sh outage <run> <sec> # run의 정산 결과 반영이 시작되면 Market DB를 sec초 동안 끊음 (일시 장애)
 #   ./scripts/bench/settlement/fault.sh outage-mp <run> <sec> # run의 MP 지급이 시작되면 Member-Point DB를 sec초 동안 끊음
+#   ./scripts/bench/settlement/fault.sh stall-mp <run> <ms> [n=3000] # MP 지급이 n건을 넘으면 MP 쓰기를 ms 동안 막음 (커밋 지연 재현)
 #   ./scripts/bench/settlement/fault.sh clear              # 주입 해제
 #   ./scripts/bench/settlement/fault.sh status
 #
@@ -65,10 +66,20 @@ SQL
     mpq -e "ALTER USER 'memberpoint_user'@'%' ACCOUNT UNLOCK;"
     echo "mp outage end $(date +%T)"
     ;;
+  stall-mp)
+    # MP 쓰기를 ms 동안 막는다 (짧은 커밋 지연 재현). run의 MP 지급이 n건을 넘으면 시작한다. spend p95 원인 분석용 (§17.7)
+    run="${2:?run}"; ms="${3:?ms}"; after="${4:-3000}"
+    pid_lo=$(pred_lo "$run"); pid_hi=$(pred_hi "$run")
+    until [ "$(mpq -e "SELECT COUNT(*) >= $after FROM point_history WHERE type = 'SETTLE_MARKET'
+                      AND reference_type = 'MARKET_PREDICTION' AND reference_id BETWEEN $pid_lo AND $pid_hi;")" = "1" ]; do sleep 0.05; done
+    echo "stall start $(date +%T.%3N)"
+    mpq -e "FLUSH TABLES WITH READ LOCK; DO SLEEP($ms / 1000); UNLOCK TABLES;"
+    echo "stall end $(date +%T.%3N)"
+    ;;
   clear)
     mq -e "DROP TRIGGER IF EXISTS bench_poison; ALTER USER 'market_user'@'%' ACCOUNT UNLOCK;"
     mpq -e "ALTER USER 'memberpoint_user'@'%' ACCOUNT UNLOCK;"
     echo "fault cleared" ;;
   status) mq -e "SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = 'market';" ;;
-  *) sed -n '2,12p' "$0"; exit 1 ;;
+  *) sed -n '2,13p' "$0"; exit 1 ;;
 esac

@@ -1,6 +1,7 @@
 package com.todongsan.memberpointservice.point.event;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.todongsan.memberpointservice.global.config.ConsumerDatabase;
 import com.todongsan.memberpointservice.point.dto.response.BatchItemResult;
 import com.todongsan.memberpointservice.point.entity.PointHistoryType;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -24,6 +25,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -66,11 +68,15 @@ class MarketPointRequestConsumerTest {
     @Mock
     JdbcTemplate jdbcTemplate;
 
+    @Mock
+    ConsumerDatabase consumerDatabase;
+
     MarketPointRequestConsumer consumer;
 
     @BeforeEach
     void setUp() {
-        consumer = new MarketPointRequestConsumer(new ObjectMapper(), batchApplier, marketPointRequestService, jdbcTemplate);
+        lenient().when(consumerDatabase.jdbcTemplate()).thenReturn(jdbcTemplate);
+        consumer = new MarketPointRequestConsumer(new ObjectMapper(), batchApplier, marketPointRequestService, consumerDatabase);
     }
 
     @Test

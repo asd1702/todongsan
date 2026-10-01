@@ -1004,3 +1004,26 @@ MP 배치 뒤 병목이 Market 결과 반영으로 옮겨갔다 (⑩: MP 완료 
 잠금을 잡고 있으므로 detail마다 **최종 상태만 한 번** 쓴다 (배치 안 실패 → 성공은 성공 한 번). 상태 조건은 건 단위와 같게 둔다.
 `VALUES ROW` JOIN은 H2가 지원하지 않으므로 묶음 반영 테스트(`PointResultBatchApplierTest`, `PointResultBatchEquivalenceTest`)는 기존 MySQL 통합 테스트 환경(`mysqlit` 프로필, `market-mysql-it` 컨테이너)에서 돈다. 동등성 테스트는 배치 두 개로 나눠 배치 사이 상태 변화(이전 배치의 실패 → 다음 배치의 성공, 실패 사유 삭제)까지 비교한다.
 참고: jOOQ "row-by-row / batch / bulk" 비교, 카카오페이 Spring Batch 성능 팁(같은 값은 IN, 다른 값은 batch), MySQL 8.0 bulk update 벤치마크(JOIN > CASE >>> 문장 여러 개).
+
+### 17.7 정산 중 spend p95 급등과 커넥션 풀 분리 (구현, 결과 ⑬)
+
+MP 배치 이후 1만 명 run 8번 중 2번, 정산 시작 직후 spend p95가 239~295ms로 튀었다 (평소 55~75ms).
+
+- **증상**: 개별 spend가 느린 것이 아니라 **약 0.5초 동안 MP의 모든 처리(spend와 배치 consumer 3개)가 함께 멈췄다가 동시에 풀린다.** 같은 시각 Market(다른 JVM·DB)은 정상 커밋을 이어갔다.
+- **배제**: 행 잠금(락 대기 7~11건뿐), VM 전체 디스크(Market 정상), JVM GC(3 run 최대 19.6ms), redo log 포화(최대 16MB / 100MB).
+- **확인된 증폭**: `fault.sh stall-mp`로 MP 쓰기를 일부러 막아 재현했다. 커넥션 풀 10(현재)은 p95 448ms·차단 해제 **후에도** 0.6초 추가 정지, 풀 40은 p95 141ms·해제와 함께 회복.
+  spend와 배치 consumer가 **같은 커넥션 풀**을 쓰므로, 커밋이 잠깐 느려지면 들어오는 spend가 연결을 점유해 풀이 바닥나고 consumer도 함께 묶이며 회복이 늦어진다.
+- **미확인**: 최초의 짧은 커밋 지연을 일으키는 원인 (MP 소비 시작 직후에만 나타남). 증폭을 막으면 원인과 무관하게 영향이 0.5초 → 원래 지연 수준으로 줄어든다.
+
+**조치: 커넥션 풀 분리 (벌크헤드).** 근거: Azure Architecture Center Bulkhead 패턴(커넥션 풀 고갈로 인한 연쇄 장애 방지, 중요한 consumer 격리),
+HikariCP "About Pool Sizing"("긴 트랜잭션과 짧은 트랜잭션이 섞이면 풀 인스턴스 두 개가 잘 통한다").
+
+| 항목 | 내용 |
+|---|---|
+| 구조 | MP에 consumer 전용 풀 `market-point-consumer` (`ConsumerDatabase`). 접속 정보·Hikari 설정은 API 풀과 같고 크기·이름만 다르다. DataSource/JdbcTemplate 빈으로 노출하지 않는다 (노출하면 Spring Boot 기본 자동 설정이 꺼진다) |
+| 크기 | API 10 (기존) + consumer 6 (`MARKET_POINT_REQUESTS_POOL_SIZE`, 동시 consumer thread 수 = 정산 지급 3 + 환불 3). 풀을 키우지 않고 나눈다 (HikariCP: 큰 풀은 처리량이 아니라 지연을 늘린다) |
+| consumer 풀을 쓰는 경로 | 배치 트랜잭션, 이력·잔액·결과 outbox 기록, DB 상태 확인(SELECT 1) |
+| 한계 | 건 단위 fallback은 기존 JPA 경로라 API 풀을 쓴다 (드문 실패 경로, 검증된 기준 구현 유지). 같은 MySQL이므로 DB 자체가 느려지면 spend도 그만큼은 느려진다 — 풀 분리는 **증폭·연장**을 막는다. consumer 풀은 첫 배치에서 시작된다 (lazy) |
+| 검증 | `ConsumerDatabaseBulkheadTest`: API 풀을 모두 점유해도 적립 배치가 처리되고, consumer 풀을 모두 점유해도 spend가 처리된다 (풀 점유가 실제로 막는지 변형 테스트로 확인) |
+
+**다음 후보: 프로세스 분리.** Azure 문서는 비동기 메시지 consumer를 전용 인스턴스로 격리하는 방법도 제시한다. MP를 API 배포와 consumer 배포로 나누면 DB 풀뿐 아니라 JVM·CPU·GC까지 격리된다 (배포 단위 증가가 비용).

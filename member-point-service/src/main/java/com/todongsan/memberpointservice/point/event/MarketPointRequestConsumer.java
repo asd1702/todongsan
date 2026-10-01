@@ -2,13 +2,13 @@ package com.todongsan.memberpointservice.point.event;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.todongsan.memberpointservice.global.config.ConsumerDatabase;
 import com.todongsan.memberpointservice.point.dto.response.BatchItemResult;
 import com.todongsan.memberpointservice.point.entity.PointHistoryType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.listener.BatchListenerFailedException;
 import org.springframework.stereotype.Component;
@@ -41,7 +41,7 @@ public class MarketPointRequestConsumer {
     private final ObjectMapper objectMapper;
     private final MarketPointCreditBatchApplier batchApplier;
     private final MarketPointRequestService marketPointRequestService;
-    private final JdbcTemplate jdbcTemplate;
+    private final ConsumerDatabase consumerDatabase;
 
     /** 토픽마다 listener container가 따로라 처리 thread도 따로다. 대량 정산 지급이 환불을 지연시키지 않는다. */
     @KafkaListener(topics = "${member-point.kafka.market-point-requests.refund-topic}", batch = "true")
@@ -121,7 +121,7 @@ public class MarketPointRequestConsumer {
     /** DB가 살아 있는데 실패했다면 메시지 쪽 문제다. 메시지는 SELECT 1을 실패시킬 수 없다. */
     private boolean isDatabaseAvailable() {
         try {
-            jdbcTemplate.queryForObject("SELECT 1", Integer.class);
+            consumerDatabase.jdbcTemplate().queryForObject("SELECT 1", Integer.class);
             return true;
         } catch (RuntimeException probeFailure) {
             log.warn("Member-Point DB is unavailable. Market point requests wait for recovery instead of DLT. probe={}",

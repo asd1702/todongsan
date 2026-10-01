@@ -46,14 +46,17 @@ public class PointResultOutboxWriter {
         jdbcTemplate.update(INSERT_SQL, toRow(request, result, LocalDateTime.now(ZONE).truncatedTo(ChronoUnit.MILLIS)));
     }
 
-    /** 배치 적립의 결과 이벤트를 한 번에 기록한다 (JDBC batch, ASYNC_POINT_FLOW.md §17). requests와 results는 같은 순서다. */
-    public void appendAll(List<MarketPointRequestEvent> requests, List<BatchItemResult> results) {
+    /**
+     * 배치 적립의 결과 이벤트를 한 번에 기록한다 (JDBC batch, ASYNC_POINT_FLOW.md §17). requests와 results는 같은 순서다.
+     * 배치 트랜잭션과 같은 커넥션 풀(consumer 전용, §17.7)의 JdbcTemplate을 받는다.
+     */
+    public void appendAll(JdbcTemplate target, List<MarketPointRequestEvent> requests, List<BatchItemResult> results) {
         LocalDateTime occurredAt = LocalDateTime.now(ZONE).truncatedTo(ChronoUnit.MILLIS);
         List<Object[]> rows = new ArrayList<>(requests.size());
         for (int i = 0; i < requests.size(); i++) {
             rows.add(toRow(requests.get(i), results.get(i), occurredAt));
         }
-        jdbcTemplate.batchUpdate(INSERT_SQL, rows);
+        target.batchUpdate(INSERT_SQL, rows);
     }
 
     private Object[] toRow(MarketPointRequestEvent request, BatchItemResult result, LocalDateTime occurredAt) {

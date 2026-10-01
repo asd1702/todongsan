@@ -13,7 +13,7 @@ export MSYS_NO_PATHCONV=1
 run="${1:?run}"; label="${2:?label}"; n="${3:-10000}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$DIR/../../../reports/bench/settlement"
-CSV="$OUT/redo-results.csv"
+CSV="${RUN_METRICS_CSV:-$OUT/redo-results.csv}"
 pq() { docker exec -i -e MYSQL_PWD="${MEMBERPOINT_MYSQL_ROOT_PASSWORD:-memberpoint-root-local-password}" member-point-mysql mysql -uroot -N "$@" 2>/dev/null; }
 MUTEXES="'wait/synch/mutex/innodb/log_files_mutex','wait/synch/mutex/innodb/log_writer_mutex'"
 

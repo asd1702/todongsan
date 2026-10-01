@@ -3,6 +3,7 @@
 #
 #   ./scripts/bench/settlement/apps.sh build                     # bootJar 빌드 (코드 변경 시)
 #   ./scripts/bench/settlement/apps.sh start <sync|async> [member_id|market_id]
+#   MP_APP_ARGS="--spring.kafka.consumer.max-poll-records=200" ./scripts/bench/settlement/apps.sh start async   # MP에만 추가 인자
 #   ./scripts/bench/settlement/apps.sh stop
 #   ./scripts/bench/settlement/apps.sh status
 #
@@ -61,7 +62,7 @@ case "${1:-}" in
     JWT_SECRET=bench-jwt-secret-must-be-32-chars-long CRYPTO_AES_KEY='bench-aes-key-must-be-32-chars!!' \
     MARKET_POINT_REQUESTS_CONSUMER_ENABLED=true POINT_OUTBOX_CLEANUP_SCHEDULER_ENABLED=false \
       nohup java -jar "$mp_jar" --spring.jpa.show-sql=false --logging.level.org.hibernate.SQL=WARN \
-        --logging.level.com.todongsan.memberpointservice=INFO > "$mp_log" 2>&1 &
+        --logging.level.com.todongsan.memberpointservice=INFO ${MP_APP_ARGS:-} > "$mp_log" 2>&1 &
     wait_ready "$mp_log" "Started MemberPointServiceApplication" "member-point"
 
     MARKET_POINT_TRANSPORT_MODE="$mode" MARKET_POINT_REQUEST_KEY="${key/na/member_id}" MARKET_POINT_RESULTS_CONSUMER_ENABLED=true \

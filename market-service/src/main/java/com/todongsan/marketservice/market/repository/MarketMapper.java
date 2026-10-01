@@ -429,4 +429,6 @@ public interface MarketMapper {
     AdminMarketStatusCountsRow selectAdminMarketStatusCounts(@Param("now") LocalDateTime now);
 
     int insertMarketOutboxEvents(@Param("events") List<MarketOutboxEvent> events);
+
+    MarketRefundDetail selectRefundDetailByIdempotencyKeyForUpdate(@Param("idempotencyKey") String idempotencyKey);
 }

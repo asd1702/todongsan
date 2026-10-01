@@ -26,7 +26,7 @@ public class MarketRefundService {
 
     private static final String REFERENCE_TYPE = "MARKET_PREDICTION";
     static final String REASON = "Market 무효 처리 환불";
-    private static final String RETRY_REASON = "Market 무효 처리 환불 재시도";
+    static final String RETRY_REASON = "Market 무효 처리 환불 재시도";
 
     private final MarketRefundTransactionService transactionService;
     private final MemberPointClient memberPointClient;
@@ -64,9 +64,14 @@ public class MarketRefundService {
     }
 
     public RefundMarketResponse retryRefundMarket(long marketId) {
-        MarketRefundRetryPreparation preparation = transactionService.prepareRefundRetry(marketId);
+        boolean async = pointTransportProperties.isAsync();
+        MarketRefundRetryPreparation preparation = transactionService.prepareRefundRetry(marketId, async);
         if (preparation.completed()) {
             return preparation.toResponse(0, 0, 0, RefundStatus.COMPLETED);
+        }
+        if (async) {
+            // 재시도 요청은 outbox에 기록됨 (R5). 결과는 Member-Point 결과 이벤트로 반영된다.
+            return preparation.toResponse(0, 0, 0, RefundStatus.IN_PROGRESS);
         }
 
         String batchIdempotencyKey = retryBatchIdempotencyKey(preparation);

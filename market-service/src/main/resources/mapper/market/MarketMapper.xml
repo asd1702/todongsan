@@ -1596,4 +1596,11 @@
         </foreach>
     </insert>
 
+    <select id="selectRefundDetailByIdempotencyKeyForUpdate" resultType="com.todongsan.marketservice.market.entity.MarketRefundDetail">
+        SELECT *
+        FROM market_refund_detail
+        WHERE idempotency_key = #{idempotencyKey}
+        FOR UPDATE
+    </select>
+
 </mapper>

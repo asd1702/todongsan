@@ -3,20 +3,21 @@ package com.todongsan.memberpointservice.point.event;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.todongsan.memberpointservice.point.dto.response.BatchItemResult;
 import com.todongsan.memberpointservice.point.entity.PointHistoryType;
-import com.todongsan.memberpointservice.point.service.PointInternalService;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -28,7 +29,7 @@ class MarketPointRequestConsumerTest {
     private static final String TOPIC = "market.point-requests";
 
     /** docs/architecture/ASYNC_POINT_FLOW.md §8.3 예시와 동일 (consumer 측 계약 확인) */
-    private static final String REFUND_EVENT = """
+    static final String REFUND_EVENT = """
             {
               "eventId": "7f1c2a9e-4b0d-4c5e-9a51-2f7b3c8d1e04",
               "eventType": "MARKET_REFUND_REQUESTED",
@@ -49,13 +50,13 @@ class MarketPointRequestConsumerTest {
             """;
 
     @Mock
-    PointInternalService pointInternalService;
+    MarketPointRequestService marketPointRequestService;
 
     MarketPointRequestConsumer consumer;
 
     @BeforeEach
     void setUp() {
-        consumer = new MarketPointRequestConsumer(new ObjectMapper(), pointInternalService);
+        consumer = new MarketPointRequestConsumer(new ObjectMapper(), marketPointRequestService);
     }
 
     @Test
@@ -64,16 +65,18 @@ class MarketPointRequestConsumerTest {
 
         consumer.consume(record(REFUND_EVENT));
 
-        verify(pointInternalService).creditMarketPoint(
-                PointHistoryType.REFUND_MARKET,
-                7L,
-                1001L,
-                new BigDecimal("300.00"),
-                "MARKET_PREDICTION",
-                7L,
-                "Market 무효 처리 환불",
-                "MARKET_REFUND:market:42:prediction:7:member:1001"
-        );
+        ArgumentCaptor<MarketPointRequestEvent> captor = ArgumentCaptor.forClass(MarketPointRequestEvent.class);
+        verify(marketPointRequestService).process(captor.capture(), eq(PointHistoryType.REFUND_MARKET));
+        MarketPointRequestEvent.Data data = captor.getValue().data();
+        assertThat(captor.getValue().eventId()).isEqualTo("7f1c2a9e-4b0d-4c5e-9a51-2f7b3c8d1e04");
+        assertThat(data.marketId()).isEqualTo(42L);
+        assertThat(data.predictionId()).isEqualTo(7L);
+        assertThat(data.memberId()).isEqualTo(1001L);
+        assertThat(data.amount()).isEqualByComparingTo(new BigDecimal("300.00"));
+        assertThat(data.referenceType()).isEqualTo("MARKET_PREDICTION");
+        assertThat(data.referenceId()).isEqualTo(7L);
+        assertThat(data.reason()).isEqualTo("Market 무효 처리 환불");
+        assertThat(data.idempotencyKey()).isEqualTo("MARKET_REFUND:market:42:prediction:7:member:1001");
     }
 
     @Test
@@ -85,9 +88,7 @@ class MarketPointRequestConsumerTest {
 
         consumer.consume(record(event));
 
-        verify(pointInternalService).creditMarketPoint(
-                eq(PointHistoryType.SETTLE_MARKET), anyLong(), anyLong(), any(), anyString(), anyLong(), anyString(),
-                eq("MARKET_SETTLEMENT_REWARD:market:42:prediction:7:member:1001"));
+        verify(marketPointRequestService).process(any(), eq(PointHistoryType.SETTLE_MARKET));
     }
 
     @Test
@@ -98,8 +99,7 @@ class MarketPointRequestConsumerTest {
 
         consumer.consume(record(event));
 
-        verify(pointInternalService).creditMarketPoint(
-                eq(PointHistoryType.REFUND_MARKET), anyLong(), anyLong(), any(), anyString(), anyLong(), anyString(), anyString());
+        verify(marketPointRequestService).process(any(), eq(PointHistoryType.REFUND_MARKET));
     }
 
     @Test
@@ -109,7 +109,7 @@ class MarketPointRequestConsumerTest {
         assertThatThrownBy(() -> consumer.consume(record(event)))
                 .isInstanceOf(NonRetryableEventException.class)
                 .hasMessageContaining("MARKET_SPEND_REQUESTED");
-        verifyNotCredited();
+        verifyNotProcessed();
     }
 
     @Test
@@ -119,14 +119,14 @@ class MarketPointRequestConsumerTest {
         assertThatThrownBy(() -> consumer.consume(record(event)))
                 .isInstanceOf(NonRetryableEventException.class)
                 .hasMessageContaining("schemaVersion=2");
-        verifyNotCredited();
+        verifyNotProcessed();
     }
 
     @Test
     void 깨진_JSON은_재시도하지_않는다() {
         assertThatThrownBy(() -> consumer.consume(record("{not-json")))
                 .isInstanceOf(NonRetryableEventException.class);
-        verifyNotCredited();
+        verifyNotProcessed();
     }
 
     @Test
@@ -137,13 +137,23 @@ class MarketPointRequestConsumerTest {
 
         assertThatThrownBy(() -> consumer.consume(record(event)))
                 .isInstanceOf(NonRetryableEventException.class);
-        verifyNotCredited();
+        verifyNotProcessed();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"marketId", "predictionId", "memberId", "amount", "referenceType", "referenceId", "idempotencyKey"})
+    void 필수_필드가_없으면_재시도하지_않는다(String field) {
+        String event = REFUND_EVENT.replaceAll("(\"" + field + "\": )[^,\\n]+", "$1null");
+
+        assertThatThrownBy(() -> consumer.consume(record(event)))
+                .isInstanceOf(NonRetryableEventException.class)
+                .hasMessageContaining("Required field is missing");
+        verifyNotProcessed();
     }
 
     @Test
     void 처리_중_일시_장애는_그대로_전파해_재시도하게_한다() {
-        when(pointInternalService.creditMarketPoint(any(), any(), any(), any(), any(), any(), any(), any()))
-                .thenThrow(new IllegalStateException("db down"));
+        when(marketPointRequestService.process(any(), any())).thenThrow(new IllegalStateException("db down"));
 
         assertThatThrownBy(() -> consumer.consume(record(REFUND_EVENT)))
                 .isInstanceOf(IllegalStateException.class)
@@ -151,13 +161,12 @@ class MarketPointRequestConsumerTest {
     }
 
     private void stubProcessed() {
-        when(pointInternalService.creditMarketPoint(any(), any(), any(), any(), any(), any(), any(), any()))
+        when(marketPointRequestService.process(any(), any()))
                 .thenReturn(BatchItemResult.builder().status("PROCESSED").build());
     }
 
-    private void verifyNotCredited() {
-        verify(pointInternalService, never())
-                .creditMarketPoint(any(), any(), any(), any(), any(), any(), any(), any());
+    private void verifyNotProcessed() {
+        verify(marketPointRequestService, never()).process(any(), any());
     }
 
     private ConsumerRecord<String, String> record(String value) {

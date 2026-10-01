@@ -1,6 +1,6 @@
 # Market ↔ Member-Point 비동기 포인트 흐름 설계
 
-> 상태: **구현 중** (2단계 환불 요청 방향 완료, 3단계 결과 방향 예정)
+> 상태: **구현 중** (1~3단계 완료: 환불 요청·결과 방향과 R5. 4단계 정산 적용 예정)
 > 범위: Market Service ↔ Member-Point Service. Battle / Insight 연계는 이 문서의 범위가 아니다.
 > 상위 원칙: 루트 `AGENTS.md` 섹션 5 "비동기 이벤트 원칙 (DB = SSOT, CDC)"
 
@@ -355,7 +355,7 @@ CREATE TABLE market_outbox_event (          -- member-point: point_outbox_event
 |---|---|---|
 | 1 | 설계 확정 (이 문서 + 이벤트 스키마 + ERD) — **완료** | 문서 리뷰 |
 | 2 | **환불 요청 방향** — **완료**: Market outbox (Flyway V2), 환불 준비 TX에서 outbox 기록, 커넥터 등록, MP consumer. async 모드에서 환불 재시도 스케줄러는 skip | 무효 처리 → MP `point_history` 생성, 같은 메시지 재전달 시 `ALREADY_PROCESSED` |
-| 3 | **환불 결과 방향**: MP outbox, 결과 이벤트, Market consumer 완료 판정 (R2), async 수동 재시도 outbox 재기록 (R5) | 무효 → `VOIDED` 자동 완료, MP 중단·재기동 후에도 유실 없음, 수동 재시도가 Feign을 호출하지 않음 |
+| 3 | **환불 결과 방향** — **완료**: MP outbox (Flyway V2, JdbcTemplate), 결과 이벤트, Market consumer 완료 판정 (R2), async 수동 재시도 outbox 재기록 (R5) | 무효 → `VOIDED` 자동 완료, MP 중단·재기동 후에도 유실 없음, 수동 재시도가 Feign을 호출하지 않음 |
 | 4 | **정산 적용**: 2~3 구조를 정산에 적용 | 정산 → `SETTLED`, 기존 정산 테스트 통과 |
 | 5 | 정리: DLT 재발행 스크립트 (R3), DLT 경고·lag·커넥터 점검 절차 (R6, §6.3), outbox 삭제 (R7), 실험 수행 및 결과 기록 | 전체 테스트, 실험 결과 문서화 |
 | 6 | **spend 펜싱** (§12.6): MP `POST /internal/api/v1/points/spend/fence`, Market 대사 `NOT_FOUND` 처리 변경 | 펜싱 후 늦게 도착한 spend가 차감하지 못함, 펜싱과 spend 동시 실행 시 결과가 하나로 결정됨 |
@@ -491,3 +491,62 @@ Saga 용어로는 보상(compensation)이 아닌 대응책(countermeasure)이다
 | Market | 대사에서 `NOT_FOUND`면 펜싱 호출 후 결과에 따라 처리 | `MARKET_FAILURE_SCENARIO.md` 5-6 |
 
 Market의 prediction 상태와 이벤트 스키마는 바뀌지 않는다. "NOT_FOUND는 자동 재차감하지 않는다"는 기존 원칙도 유지된다 (펜싱은 실패를 확정할 뿐 차감하지 않는다).
+
+---
+
+## 13. 3단계 상세 설계 — 환불 결과 방향 + R5 (확정)
+
+### 13.1 흐름
+
+```text
+[MP TX] MarketPointRequestService (2단계 consumer 확장)
+  creditMarketPoint → point_history + 잔액          ┐ 같은 트랜잭션
+  point_outbox_event 1건 (key = market_id)            ┘
+      │ Debezium (member-point-mysql, connectors/memberpoint-outbox.json)
+      ▼
+  memberpoint.point-results
+      │
+      ▼
+[Market TX] PointResultConsumer → MarketRefundTransactionService.applyAsyncRefundResult
+  lock market → detail(idempotencyKey, FOR UPDATE) → detail·prediction 갱신 → market_void 완료 판정
+```
+
+### 13.2 결정
+
+| # | 항목 | 결정 |
+|---|---|---|
+| 1 | Market 결과 consumer on/off | 전송 방식 플래그와 별도: `market.kafka.point-results.enabled` (`MARKET_POINT_RESULTS_CONSUMER_ENABLED`, 기본 false). sync로 되돌려도 이미 나간 요청의 결과는 반영해야 한다 |
+| 2 | `ALREADY_PROCESSED` 결과 | `POINT_CREDITED`(status `ALREADY_PROCESSED`)를 다시 발행한다. R5 재전송 건을 Market이 SUCCESS로 마감할 수 있다 |
+| 3 | R5 직후 이전 FAILED 결과 재전달 | 허용. 일시적으로 FAILED로 돌아가도 새 요청의 SUCCESS가 오면 SUCCESS로 끝난다 (SUCCESS는 종결 상태) |
+| 4 | 범위 | 3단계는 환불만 구현. 정산 결과(`requestEventType = MARKET_SETTLEMENT_PAYOUT_REQUESTED`)는 4단계 전까지 처리 불가로 DLT |
+
+### 13.3 결과 반영 규칙 (Market)
+
+| 결과 | detail 현재 상태 | 처리 |
+|---|---|---|
+| `POINT_CREDITED` | PENDING / FAILED / UNKNOWN | → `SUCCESS`, prediction → `REFUNDED` |
+| `POINT_CREDITED` | SUCCESS | 변화 없음 (재전달) |
+| `POINT_CREDIT_FAILED` | PENDING / FAILED / UNKNOWN | → `FAILED`(fail_reason = errorCode), prediction `REFUND_PENDING` 유지 |
+| `POINT_CREDIT_FAILED` | SUCCESS | 무시 (SUCCESS는 종결) |
+| 모든 결과 | detail 없음 | 처리 불가 → DLT |
+
+기존 SQL 가드를 그대로 쓴다: `updateRetryRefundDetailStatus`(`status IN ('FAILED','UNKNOWN','PENDING')`), `markPredictionRefunded` / `markPredictionRefundPending`(`REFUND_PENDING`, `REFUND_UNKNOWN`). 반영 후 `countNonSuccessRefundDetails = 0`이면 `market_void.refund_status = COMPLETED`.
+
+### 13.4 R5 — async 수동 재시도
+
+```text
+POST /refunds/retry (async)
+→ lock market, 재시도 대상 detail 선택 (FAILED, UNKNOWN, 3분 초과 PENDING — 기존 selectRetryableRefundDetails)
+→ detail → PENDING, prediction → REFUND_PENDING
+→ 같은 item 멱등성 키 + 새 eventId로 outbox 기록 → 응답 IN_PROGRESS
+```
+
+MP 요청 해시는 `memberId|type|amount|referenceType|referenceId`이고 reason은 포함되지 않으므로, 재시도 사유가 달라도 `IDEMPOTENCY_KEY_CONFLICT`가 아닌 `ALREADY_PROCESSED`가 된다.
+
+### 13.5 검증 중 반영한 사항
+
+| # | 발견 | 반영 |
+|---|---|---|
+| F1 | H2 `JSON` 컬럼에 문자열을 바인딩하면 JSON 문자열 리터럴(`"{\"a\":1}"`)로 저장된다 (H2 2.3.232로 실험). MP 테스트는 엔티티 기준 `create-drop` | MP outbox는 JPA 엔티티 대신 `JdbcTemplate`으로 기록한다. 테스트 스키마는 `@Sql`(CLOB). JPA 트랜잭션과 같은 트랜잭션으로 묶이는지 롤백 테스트로 확인한다 |
+| F2 | MP consumer가 `data` null만 검사. `amount` 누락 시 `RequestHashUtil`에서 NPE → 4회 재시도 후 DLT, `marketId` 누락 시 결과 outbox key 불가, 결과 스키마 필수 필드 위반 | 요청 스키마 필수 필드를 검사하고 누락 시 즉시 DLT |
+| F3 | `prepareRefund` / `prepareRefundRetry`의 락 순서는 market → detail → market_void | 결과 반영도 market row를 먼저 잠근다 (현재 경우의 수로 데드락은 없지만 순서를 통일) |

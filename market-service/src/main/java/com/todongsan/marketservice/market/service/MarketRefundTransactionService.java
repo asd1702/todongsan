@@ -133,7 +133,7 @@ public class MarketRefundTransactionService {
     }
 
     @Transactional
-    public MarketRefundRetryPreparation prepareRefundRetry(long marketId) {
+    public MarketRefundRetryPreparation prepareRefundRetry(long marketId, boolean publishPointRequests) {
         LocalDateTime now = LocalDateTime.now();
         Market market = marketMapper.lockMarketById(marketId);
         if (market == null) {
@@ -165,7 +165,44 @@ public class MarketRefundTransactionService {
             throw new CustomException(MarketErrorCode.MARKET_REFUND_NOT_ALLOWED);
         }
 
+        if (publishPointRequests) {
+            // async 수동 재시도(R5): 같은 item 멱등성 키 + 새 eventId로 outbox에 다시 기록한다.
+            for (MarketRefundDetail detail : retryDetails) {
+                updateRetryDetail(detail, TransactionItemStatus.PENDING, null, now);
+                marketMapper.markPredictionRefundPending(detail.getPredictionId(), null, now);
+            }
+            pointRequestOutboxWriter.appendRefundRequests(marketId, retryDetails, MarketRefundService.RETRY_REASON, now);
+            marketMapper.updateMarketVoidRefundStatus(marketVoid.getId(), RefundStatus.IN_PROGRESS, now);
+        }
         return new MarketRefundRetryPreparation(marketId, marketVoid.getId(), retryDetails, false);
+    }
+
+    /**
+     * Member-Point 결과 이벤트(memberpoint.point-results)를 환불 detail에 반영한다.
+     * SUCCESS는 종결 상태이므로 SQL 가드로 다시 바뀌지 않는다 (ASYNC_POINT_FLOW.md §13.3).
+     */
+    @Transactional
+    public PointResultApplyOutcome applyAsyncRefundResult(
+            long marketId,
+            String idempotencyKey,
+            boolean credited,
+            String errorCode
+    ) {
+        LocalDateTime now = LocalDateTime.now();
+        // 락 순서: market → detail → market_void (prepareRefund / prepareRefundRetry와 동일)
+        if (marketMapper.lockMarketById(marketId) == null) {
+            return PointResultApplyOutcome.DETAIL_NOT_FOUND;
+        }
+        MarketRefundDetail detail = marketMapper.selectRefundDetailByIdempotencyKeyForUpdate(idempotencyKey);
+        if (detail == null) {
+            return PointResultApplyOutcome.DETAIL_NOT_FOUND;
+        }
+
+        boolean updated = credited
+                ? markRetryRefundSuccess(detail, now)
+                : markRetryRefundFailed(detail, failureReason(errorCode, "MEMBER_POINT_FAILED"), now);
+        resolveRefundStatus(detail.getMarketVoidId(), now);
+        return updated ? PointResultApplyOutcome.APPLIED : PointResultApplyOutcome.SKIPPED;
     }
 
     @Transactional(readOnly = true)

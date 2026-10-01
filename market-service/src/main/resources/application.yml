@@ -6,6 +6,11 @@ spring:
     baseline-on-migrate: ${FLYWAY_BASELINE_ON_MIGRATE:false}
   profiles:
     default: local
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: market-service
+      auto-offset-reset: earliest
   cloud:
     openfeign:
       client:
@@ -41,6 +46,11 @@ market:
     mode: ${MARKET_POINT_TRANSPORT_MODE:sync}
     # async 요청 토픽(market.point-requests)의 Kafka key: member_id | market_id
     request-key: ${MARKET_POINT_REQUEST_KEY:member_id}
+  kafka:
+    point-results:
+      # Member-Point 결과 이벤트 consumer. 전송 방식과 별도로 켠다 (sync로 되돌려도 이미 나간 요청의 결과는 반영해야 한다)
+      enabled: ${MARKET_POINT_RESULTS_CONSUMER_ENABLED:false}
+      topic: memberpoint.point-results
   scheduler:
     prediction-reconciliation:
       enabled: true

@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.todongsan.memberpointservice.point.dto.response.BatchItemResult;
 import com.todongsan.memberpointservice.point.entity.PointHistoryType;
-import com.todongsan.memberpointservice.point.service.PointInternalService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -31,7 +30,7 @@ public class MarketPointRequestConsumer {
     );
 
     private final ObjectMapper objectMapper;
-    private final PointInternalService pointInternalService;
+    private final MarketPointRequestService marketPointRequestService;
 
     @KafkaListener(topics = "${member-point.kafka.market-point-requests.topic}")
     public void consume(ConsumerRecord<String, String> record) {
@@ -39,16 +38,7 @@ public class MarketPointRequestConsumer {
         PointHistoryType type = historyType(event);
         MarketPointRequestEvent.Data data = event.data();
 
-        BatchItemResult result = pointInternalService.creditMarketPoint(
-                type,
-                data.predictionId(),
-                data.memberId(),
-                data.amount(),
-                data.referenceType(),
-                data.referenceId(),
-                data.reason(),
-                data.idempotencyKey()
-        );
+        BatchItemResult result = marketPointRequestService.process(event, type);
 
         log.info("Market point request processed. eventId={}, eventType={}, key={}, memberId={}, status={}, errorCode={}",
                 event.eventId(), event.eventType(), record.key(), data.memberId(), result.getStatus(), result.getErrorCode());
@@ -57,12 +47,21 @@ public class MarketPointRequestConsumer {
     private MarketPointRequestEvent parse(String value) {
         try {
             MarketPointRequestEvent event = objectMapper.readValue(value, MarketPointRequestEvent.class);
-            if (event.data() == null) {
-                throw new NonRetryableEventException("Event data is missing. eventId=" + event.eventId());
-            }
+            validateRequired(event);
             return event;
         } catch (JsonProcessingException e) {
             throw new NonRetryableEventException("Malformed market point request event", e);
+        }
+    }
+
+    /** 요청 스키마 필수 필드. 누락은 재시도해도 해결되지 않으므로 즉시 DLT (ASYNC_POINT_FLOW.md §13.5 F2). */
+    private void validateRequired(MarketPointRequestEvent event) {
+        MarketPointRequestEvent.Data data = event.data();
+        if (event.eventId() == null || data == null
+                || data.marketId() == null || data.predictionId() == null || data.memberId() == null
+                || data.amount() == null || data.referenceType() == null || data.referenceId() == null
+                || data.idempotencyKey() == null) {
+            throw new NonRetryableEventException("Required field is missing. eventId=" + event.eventId());
         }
     }
 

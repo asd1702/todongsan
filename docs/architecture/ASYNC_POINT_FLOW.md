@@ -1027,3 +1027,16 @@ HikariCP "About Pool Sizing"("긴 트랜잭션과 짧은 트랜잭션이 섞이�
 | 검증 | `ConsumerDatabaseBulkheadTest`: API 풀을 모두 점유해도 적립 배치가 처리되고, consumer 풀을 모두 점유해도 spend가 처리된다 (풀 점유가 실제로 막는지 변형 테스트로 확인) |
 
 **다음 후보: 프로세스 분리.** Azure 문서는 비동기 메시지 consumer를 전용 인스턴스로 격리하는 방법도 제시한다. MP를 API 배포와 consumer 배포로 나누면 DB 풀뿐 아니라 JVM·CPU·GC까지 격리된다 (배포 단위 증가가 비용).
+
+### 17.8 redo log 용량 (구현, 결과 ⑭)
+
+**원인 (자연 정지)**: §17.7에서 남은 "최초 커밋 지연"의 원인을 커널 스택으로 확인했다 (`reports/bench/settlement/STALL_INVESTIGATION.md` 7절, run35).
+MySQL 8.0.30+는 redo를 `innodb_redo_log_capacity / 32` 크기 파일 32개로 운용한다. 기본 100MB면 파일당 약 3MB라, 배치화로 쓰기가 빨라진 정산 중 약 1초마다 파일을 교체한다.
+교체 중 redo 파일 governor(`ib_log_files_g`)가 `fsync`에서 ext4 저널(jbd2) 커밋을 수백 ms 기다리는 동안 `log_files_mutex`가 풀리지 않아 log writer가 멈추고, 모든 COMMIT이 binlog group commit에서 함께 멈췄다.
+jbd2 저널은 Docker VM 안 모든 컨테이너가 공유하므로 다른 쓰기와 겹칠 때만 크게 느려진다 (간헐성).
+
+**조치**: 두 MySQL의 `innodb_redo_log_capacity`를 2GB로 (파일당 64MB). RDS for MySQL 8.0.33+ 기본값과 같다.
+`infra/docker-compose.yml`(새로 만드는 컨테이너), 실행 중인 컨테이너는 `SET PERSIST`(데이터 볼륨의 `mysqld-auto.cnf`)로 반영했다.
+
+**운영 관점**: 같은 구조(작은 redo + 지연이 튀는 디스크)면 운영에서도 생길 수 있다. RDS는 기본 2GB라 빈도·크기가 훨씬 작고, Aurora는 로컬 redo 파일이 없어 이 경로가 없다.
+EC2 등에 직접 설치할 때는 redo 용량을 피크 쓰기량에 맞추고(통상 약 1시간 분량), DB는 전용 볼륨에 둔다. 앱의 풀 분리(§17.7)는 어떤 원인의 DB 지연이든 증폭을 막으므로 그대로 둔다.

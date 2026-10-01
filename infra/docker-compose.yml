@@ -20,6 +20,9 @@ services:
       - --binlog-row-image=FULL
       - --gtid-mode=ON
       - --enforce-gtid-consistency=ON
+      # redo는 용량/32 크기 파일 32개로 운용된다. 기본 100MB(파일당 약 3MB)는 정산 배치 쓰기에서 약 1초마다 파일을 교체하고,
+      # 교체 중 fsync가 느리면 모든 COMMIT이 함께 멈춘다. RDS 기본값과 같은 2GB로 둔다 (ASYNC_POINT_FLOW.md §17.8)
+      - --innodb-redo-log-capacity=2147483648
     volumes:
       - memberpoint_mysql_data:/var/lib/mysql
     healthcheck:
@@ -52,6 +55,8 @@ services:
       - --binlog-row-image=FULL
       - --gtid-mode=ON
       - --enforce-gtid-consistency=ON
+      # redo 용량 (member-point-mysql과 같은 이유, ASYNC_POINT_FLOW.md §17.8)
+      - --innodb-redo-log-capacity=2147483648
     volumes:
       - market_mysql_data:/var/lib/mysql
     healthcheck:

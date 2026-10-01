@@ -513,7 +513,46 @@ docker exec -i member-point-mysql mysql -uroot -p<MEMBERPOINT_MYSQL_ROOT_PASSWOR
 | `memberpoint.point-results` | Debezium (`point_outbox_event`) | market-service | `market_id` |
 | `memberpoint.point-results-dlt` | market-service (처리 실패) | 수동 확인 | 원본 key |
 
-consumer 적체 확인 (파이프라인 정체 감지, ASYNC_POINT_FLOW.md §6.3):
+### 비동기 포인트 흐름 운영 (ASYNC_POINT_FLOW.md §6, §15.1)
+
+**점검** — 커넥터 상태, consumer lag, DLT 적재·미재발행 건수를 한 번에 본다.
+커넥터가 `RUNNING`이 아니거나 미재발행 DLT가 있으면 종료 코드 1.
+
+```bash
+./scripts/cdc/health.sh
+```
+
+**DLT 유입 알림** — 각 서비스가 DLT로 보낼 때 ERROR 로그를 남긴다.
+
+```text
+Sent to DLT. topic=market.point-requests, partition=0, offset=12, key=999, cause=...NonRetryableEventException: ...
+Failed to publish to DLT. ...   ← DLT 발행 자체가 실패. 레코드는 커밋되지 않고 다시 처리된다
+```
+
+**DLT 처리** — 원인을 해결한 뒤 재발행하거나, 재처리할 수 없는 메시지는 확인 후 건너뛴다.
+
+```bash
+# 재발행 (소비 측이 멱등이므로 안전). 전용 group으로 이미 재발행한 메시지는 다시 보내지 않는다
+./scripts/cdc/replay-dlt.sh market.point-requests-dlt --dry-run
+./scripts/cdc/replay-dlt.sh market.point-requests-dlt
+
+# 건너뛰기 (재처리 불가 메시지를 확인 완료로 표시). 메시지는 DLT 토픽에 그대로 남는다
+MSYS_NO_PATHCONV=1 docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:29092 \
+  --group dlt-replay.market.point-requests-dlt --topic market.point-requests-dlt --reset-offsets --to-latest --execute
+```
+
+**커넥터 재시작** — 상태가 `FAILED`이면 원인(커넥터 로그) 확인 후 재시작한다. outbox row는 DB에 남아 있으므로 binlog 위치부터 다시 발행된다.
+
+```bash
+curl -s http://localhost:18083/connectors/market-outbox/status
+docker logs kafka-connect --since 10m 2>&1 | grep -E "ERROR|WARN"
+curl -s -X POST "http://localhost:18083/connectors/market-outbox/restart?includeTasks=true&onlyFailed=true"
+```
+
+**outbox 삭제** — Market·MP 스케줄러가 7일 지난 row를 1,000건 × 최대 10배치씩 매시간 삭제한다
+(`market.scheduler.outbox-cleanup.*`, `member-point.outbox-cleanup.*`). Debezium은 DELETE를 발행하지 않는다.
+
+consumer group 상세 (토픽·파티션별 lag):
 
 ```bash
 MSYS_NO_PATHCONV=1 docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \

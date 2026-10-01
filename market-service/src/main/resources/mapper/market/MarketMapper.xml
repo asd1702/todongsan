@@ -1638,4 +1638,16 @@
         FOR UPDATE
     </select>
 
+    <select id="lockMarketsByIdsInOrder" resultType="long">
+        SELECT id
+        FROM market
+        WHERE id IN
+        <foreach collection="marketIds" item="marketId" open="(" separator="," close=")">
+            #{marketId}
+        </foreach>
+          AND deleted_at IS NULL
+        ORDER BY id ASC
+        FOR UPDATE
+    </select>
+
 </mapper>

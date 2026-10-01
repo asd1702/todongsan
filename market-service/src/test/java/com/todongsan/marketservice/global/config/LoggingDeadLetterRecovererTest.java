@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.kafka.listener.BatchListenerFailedException;
 import org.springframework.kafka.listener.ConsumerRecordRecoverer;
 import org.springframework.kafka.listener.ListenerExecutionFailedException;
 
@@ -34,6 +35,19 @@ class LoggingDeadLetterRecovererTest {
         assertThat(output).contains("Sent to DLT. topic=memberpoint.point-results, partition=1, offset=17, key=42")
                 .contains("cause=com.todongsan.marketservice.market.event.NonRetryableEventException: Unknown eventType=POINT_DEBITED")
                 .doesNotContain("cause={}");
+    }
+
+    @Test
+    void logsRootCauseThroughBatchListenerWrappers(CapturedOutput output) {
+        ConsumerRecordRecoverer delegate = mock(ConsumerRecordRecoverer.class);
+        Exception batchFailure = new ListenerExecutionFailedException("listener failed",
+                new BatchListenerFailedException(
+                        "bench poison", new IllegalStateException("bench poison"), 3));
+
+        new LoggingDeadLetterRecoverer(delegate).accept(record, batchFailure);
+
+        assertThat(output).contains("cause=java.lang.IllegalStateException: bench poison")
+                .doesNotContain("cause=org.springframework.kafka.listener.BatchListenerFailedException");
     }
 
     @Test

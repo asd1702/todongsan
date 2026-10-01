@@ -8,6 +8,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
@@ -16,6 +17,7 @@ import java.util.Map;
 /**
  * Market 포인트 적립 요청(market.point-requests)을 처리한다.
  * 일시 장애는 예외를 던져 재시도하고, 처리 불가 메시지는 NonRetryableEventException으로 DLT에 보낸다.
+ * 처리 실패 직후 DB 상태 확인까지 실패하면 DatabaseUnavailableException으로 알려 DLT 대신 복구를 기다린다.
  */
 @Slf4j
 @Component
@@ -31,17 +33,38 @@ public class MarketPointRequestConsumer {
 
     private final ObjectMapper objectMapper;
     private final MarketPointRequestService marketPointRequestService;
+    private final JdbcTemplate jdbcTemplate;
 
     @KafkaListener(topics = "${member-point.kafka.market-point-requests.topic}")
-    public void consume(ConsumerRecord<String, String> record) {
+    public void consume(ConsumerRecord<String, String> record) throws DatabaseUnavailableException {
         MarketPointRequestEvent event = parse(record.value());
         PointHistoryType type = historyType(event);
         MarketPointRequestEvent.Data data = event.data();
 
-        BatchItemResult result = marketPointRequestService.process(event, type);
+        BatchItemResult result;
+        try {
+            result = marketPointRequestService.process(event, type);
+        } catch (RuntimeException e) {
+            if (!isDatabaseAvailable()) {
+                throw new DatabaseUnavailableException("Member-Point DB is unavailable: " + e.getMessage(), e);
+            }
+            throw e;
+        }
 
         log.info("Market point request processed. eventId={}, eventType={}, key={}, memberId={}, status={}, errorCode={}",
                 event.eventId(), event.eventType(), record.key(), data.memberId(), result.getStatus(), result.getErrorCode());
+    }
+
+    /** DB가 살아 있는데 실패했다면 메시지 쪽 문제다. 메시지는 SELECT 1을 실패시킬 수 없다. */
+    private boolean isDatabaseAvailable() {
+        try {
+            jdbcTemplate.queryForObject("SELECT 1", Integer.class);
+            return true;
+        } catch (RuntimeException probeFailure) {
+            log.warn("Member-Point DB is unavailable. Market point requests wait for recovery instead of DLT. probe={}",
+                    probeFailure.toString());
+            return false;
+        }
     }
 
     private MarketPointRequestEvent parse(String value) {

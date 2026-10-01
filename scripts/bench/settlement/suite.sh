@@ -2,6 +2,7 @@
 # 정산 sync/async 비교 실험 전체 실행 (docs/architecture/ASYNC_POINT_FLOW.md §15.2)
 #
 #   ./scripts/bench/settlement/suite.sh [rounds=3] [rate=50] [N 목록="100 1000"]
+#   BENCH_CONFIGS="async member_id;async market_id" ./scripts/bench/settlement/suite.sh   # 설정 선택
 #
 # 설정: sync / async+member_id / async+market_id
 # 설정마다: 앱 기동 → warmup run(N=10, 결과에 label=warmup으로 남김) → N × rounds 측정
@@ -10,7 +11,7 @@ set -euo pipefail
 
 rounds="${1:-3}"; rate="${2:-50}"; sizes="${3:-100 1000}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIGS=("sync na" "async member_id" "async market_id")
+IFS=";" read -r -a CONFIGS <<< "${BENCH_CONFIGS:-sync na;async member_id;async market_id}"
 
 total=$(( ${#CONFIGS[@]} * (1 + $(echo "$sizes" | wc -w) * rounds) ))
 if [ "$total" -gt 40 ]; then echo "run 수 $total > 40 (run 번호 대역 초과)" >&2; exit 1; fi

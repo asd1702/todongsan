@@ -53,7 +53,7 @@
 ## ⑤ 정산 지급 sync vs async (outbox + CDC)
 
 실행일: 2026-10-01 / 커밋: ef87ec0 / MySQL: mysql:8.4 (Docker Desktop, `innodb_flush_log_at_trx_commit=1`, `sync_binlog=1`) / Kafka 3.9.1 / Debezium 3.0
-설계·도구: `docs/architecture/ASYNC_POINT_FLOW.md` §15, `scripts/bench/settlement/` / 원본: `reports/bench/settlement/results.csv`
+설계·도구: `docs/architecture/ASYNC_POINT_FLOW.md` §15, `scripts/bench/settlement/` / 원본: `reports/bench/settlement/results-before-batch.csv` (⑥ 이후 `results.csv`에서 이름 변경)
 
 조건: 파티션 3, listener 동시성 3, 패자 = N × 0.5, 정산 중 MP spend 부하 50 rps, 설정마다 warmup 1회 후 3라운드. 값은 3라운드 **중앙값**.
 정합성: 21 run 모두 `verify.sh` PASS (지급액 = 기대값, 유실·중복 0), 정산 중 spend 실패 0건.
@@ -94,3 +94,49 @@
 - `countNonSuccessSettlementDetails`는 병목이 아니다. `status` 인덱스로 미완료 행만 범위 스캔해 회당 0.59ms, 누적 0.59s (COMMIT의 약 4%). "완료 판정이 O(N²)"이라는 초기 가설은 실측으로 기각.
 - sync가 전체 완료에서 빠른 이유도 같다: 배치 1건 = 커밋 1회.
 - 절대값은 환경 영향이 크다. 리눅스 + 로컬 SSD에서는 fsync가 1ms 미만인 경우가 많아 격차가 줄어든다. "이벤트당 커밋 1회"라는 구조적 비용은 그대로다.
+
+## ⑥ 결과 반영 배치화 before/after + 장애 주입
+
+실행일: 2026-10-01 / 설계: `docs/architecture/ASYNC_POINT_FLOW.md` §16 / 원본: `reports/bench/settlement/results.csv` (run 1~14 after, 15~22 장애 주입), before는 ⑤ (`results-before-batch.csv`)
+조건: ⑤와 같음 (파티션 3, listener 동시성 3, 패자 = N × 0.5, spend 부하 50 rps, warmup 1회 후 3라운드 중앙값). `max.poll.records = 100`.
+정합성: after 14 run 모두 `verify.sh` PASS. sync는 변경 대상이 아니라 재측정하지 않았다.
+
+### before / after
+
+| 설정 | N | Market 완료 | MP 반영 완료 | MP→Market 간격 | Market COMMIT | 정산 중 spend p95 |
+|---|---|---|---|---|---|---|
+| async + member_id | 100 | 4,212 → **2,220ms** | 2,021 → 1,862ms | 2,183 → **354ms** | 8 | 53 → 51ms |
+| async + member_id | 1,000 | 30,740 → **15,703ms** | 14,187 → 15,352ms | 16,784 → **351ms** | 약 1,001 ※ → **60** | 55 → 60ms |
+| async + market_id | 100 | 4,321 → 4,488ms | 3,700 → 4,227ms | 583 → 360ms | 10 | 45 → 49ms |
+| async + market_id | 1,000 | 34,650 → 31,357ms | 33,177 → 31,067ms | 1,508 → 290ms | 85 | 46 → 47ms |
+
+※ before COMMIT은 ⑤ 병목 분석 1회 측정값. after는 `run.sh`가 `statement/sql/commit` 증가량으로 매 run 기록.
+정산 전 spend p95(기준선)는 after에서 31~42ms로 ⑤(22~30ms)보다 높다. 같은 날 같은 환경이지만 run 간 편차로 보고, spend 간섭은 "변화 없음"으로 판단한다.
+
+### 해석
+
+1. **Market 결과 반영 병목 해소**: member_id N=1,000에서 MP 완료 후 Market 완료까지 16.8s → 0.35s. COMMIT이 약 1,000회 → 60회(배치당 평균 약 17건)로 줄었다. ⑤의 "이벤트당 COMMIT" 가설이 맞았다.
+2. **병목이 MP로 이동**: 이제 Market 완료 ≈ MP 완료다. 전체 완료 30.7s → 15.7s(약 2배). 남은 시간은 MP의 회원별 트랜잭션 1,000회 COMMIT이며, 이는 사용자 간섭 최소화(⑤ 해석 1)를 위해 의도적으로 유지한 비용이다 (§16 안 B 보류).
+3. **market_id 키는 이득이 작다** (34.7s → 31.4s): 요청 key가 market_id면 MP가 한 파티션에서 직렬 처리하므로 MP가 병목이고, 결과 반영은 원래 1.5s뿐이었다.
+4. **sync와의 격차**: N=1,000 전원 완료가 sync 8.8s 대비 3.5배 → 1.8배로 줄었다. spend 간섭(sync 3.5s vs async 약 60ms)의 이점은 그대로다.
+5. **사용자 영향 없음**: 배치 트랜잭션은 Market DB에서만 열리고 spend는 MP를 호출하므로, spend p95는 변화 없음.
+
+### 장애 주입 (async + member_id, N=200)
+
+도구: `scripts/bench/settlement/fault.sh` — `poison <run> <i>`(DB 트리거로 i번째 승자 detail UPDATE를 SQL 오류로 실패), `outage <run> <초>` / `outage-mp <run> <초>`(앱 DB 계정 잠금 + 연결 강제 종료. Debezium은 별도 계정이라 CDC 영향 없음).
+
+| run | 시나리오 | 결과 |
+|---|---|---|
+| 16 | poison pill 1건 | 배치 3회 실패 → 건 단위 fallback → **원인 1건만 DLT**, 199건 SUCCESS, 마켓은 `SETTLEMENT_IN_PROGRESS` 유지. 트리거 해제 + `replay-dlt.sh` → `SETTLED`, verify PASS (CSV의 FAIL은 재처리 전 기록) |
+| 17 | Market DB 3초 장애 | 배치 2회차에 성공. DLT 0, PASS |
+| 18 | Market DB 60초 장애 | 시도마다 커넥션 대기 30초(Hikari `connectionTimeout`) → 3회차가 장애 종료와 맞물려 성공. DLT 0, PASS. **이 동작으로 계산한 재시도 한도가 약 10분 → 그 이상 장애는 DLT로 간다는 설계 공백 발견** (§16.1 Q3 정정) |
+| — | 수정 | 실패마다 `SELECT 1`로 DB 상태 확인, 장애면 DLT 대신 30초 간격·최대 1시간 대기 (§16.2). 두 consumer 모두 적용 |
+| 19 | Market DB 150초 장애 (수정 후) | DB 확인 실패 → 남은 재시도·fallback 없이 대기 → 장애 종료 후 반영. DLT 0, PASS (Market 완료 154s) |
+| 21 | poison 1건 + Market DB 120초 장애 동시 | 장애 중 DLT 0. 복구 약 20초 뒤 poison만 기본 정책(4회 재시도)으로 DLT 1건 — 장애 대기 상태가 poison에 이어지지 않음을 확인. 재처리 후 PASS |
+| 22 | MP DB 150초 장애 | MP consumer 3개 모두 대기 → 장애 종료 후 200건 지급. DLT 0, PASS (MP·Market 완료 155s) |
+| 20 | (계획 외) Kafka Connect 정지 | PC 절전 후 Connect 워커가 rebalance에 걸려 커넥터 `UNASSIGNED`, outbox 200건이 커밋됐지만 미발행. Connect 재시작 후 Debezium이 binlog offset부터 이어 읽어 전달 → `SETTLED`, verify PASS (중복·유실 0). `health.sh`가 다음 run 시작 전에 정지를 잡았다. CSV 라벨(poison+outage)은 실제 시나리오와 다름 |
+
+관찰:
+- run 22 동안 spend 부하 201건 중 163건 실패(p50 30s). k6 부하는 MP spend API를 직접 호출하므로 MP DB 장애가 그대로 드러난 것이고, 비동기 경로와는 무관하다. Market 경유 spend는 동기 Saga(§12.3)의 `POINT_UNKNOWN` + 대사로 처리된다 (이번 run에서는 미측정).
+- DB 장애는 예외 종류가 일정하지 않았다 (`TransactionSystemException`, `CannotCreateTransactionException`, `UncategorizedSQLException`). 예외 종류가 아닌 DB 상태로 판단한 근거다.
+- Spring Kafka `DefaultErrorHandler`는 재시도 상태 리셋을 예외 클래스 `isInstance`로 판단한다. 장애·일반 실패가 같은 타입이면 poison이 1시간 대기에 묶이는 것을 단위 테스트(실제 handler)로 재현하고 타입 분리로 해결했다.

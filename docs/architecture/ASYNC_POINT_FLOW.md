@@ -1,6 +1,6 @@
 # Market ↔ Member-Point 비동기 포인트 흐름 설계
 
-> 상태: **구현 중** (1~4단계 완료, 5단계 A 운영 정리 완료, 5단계 B 실험 준비 중 — 파티션·동시성 정비(D9), seed 설계 확정. 6단계 펜싱 예정)
+> 상태: **구현 중** (1~5단계 완료, 결과 반영 배치화·DB 장애 대기 완료(§16). 다음: 요청 토픽 분리(§8.1 E5), 6단계 펜싱)
 > 범위: Market Service ↔ Member-Point Service. Battle / Insight 연계는 이 문서의 범위가 아니다.
 > 상위 원칙: 루트 `AGENTS.md` 섹션 5 "비동기 이벤트 원칙 (DB = SSOT, CDC)"
 
@@ -67,10 +67,14 @@ Kafka는 `hash(key) % partitions`로 파티션을 정하고, 한 파티션은 co
 | 대형 마켓 | 해당 파티션 쏠림, 같은 파티션의 다른 마켓 대기 | 분산 |
 | 동일 회원의 여러 마켓 이벤트 | 서로 다른 파티션에서 동시 처리 → MP 회원 row lock 경합 | 같은 파티션에서 순차 처리 → 경합 없음 |
 | 마켓 완료 판정 (결과 소비 측) | 마켓 단위 순차 → 경쟁 없음 | 여러 스레드가 동시 판정 → `SELECT ... FOR UPDATE` 필요, Market row hot spot |
-| 마켓 단위 이벤트 순서 | 보장 | 보장 안 됨 |
+| 같은 마켓 이벤트의 동시 처리 | 없음 (한 thread) | 있음 (여러 thread) |
 
 outbox row의 키는 발행 측이 정하므로 토픽마다 키를 다르게 둔다.
 **각 서비스가 자기 DB에서 lock을 거는 단위를 키로 사용한다.**
+
+키는 **동시성 제어 수단**이지 정합성의 근거가 아니다. 같은 lock 단위의 이벤트를 한 thread로 모아 락 경합과 동시 완료 판정을 없앤다.
+정합성은 Kafka 순서에 의존하지 않는다. 반영은 멱등성 키(UNIQUE) + 단조 상태 전이(detail `PENDING → SUCCESS` 종결, 조건부 UPDATE)로 보장되므로,
+재전달·DLT 재발행·파티션 재배정으로 순서가 바뀌어도 결과가 같다.
 
 | 토픽 | 방향 | 키 | 소비 측 lock 단위 |
 |---|---|---|---|
@@ -93,7 +97,7 @@ concurrency=6  → 3개 thread는 배정 없이 대기               병렬도 3
 |---|---|
 | 파티션 수 | 3 (브로커 기본값 `KAFKA_NUM_PARTITIONS: 3`으로 자동 생성). 로컬·실험 규모에 충분 |
 | listener 동시성 | 파티션 수와 같은 3. 더 크게 잡아도 병렬도는 늘지 않는다 |
-| 파티션 증설 | 줄일 수 없다. `hash(key) % 파티션 수`가 바뀌어 같은 key가 다른 파티션으로 가므로, 전환 시점에 key 단위 순서 보장(D4·D5 전제)이 일시적으로 깨질 수 있다. 처음 생성할 때 여유 있게 정한다 |
+| 파티션 증설 | 줄일 수 없다. `hash(key) % 파티션 수`가 바뀌어 같은 key가 다른 파티션으로 가므로, 전환 시점에 같은 key가 잠시 두 thread에서 처리될 수 있다 (D4·D5의 직렬화 효과가 일시적으로 깨짐). 정합성은 멱등성·상태 가드로 유지되고 락 경합만 일시적으로 는다. 처음 생성할 때 여유 있게 정한다 |
 | 다른 병목 | 병렬도가 늘어도 MP DB 커넥션 풀(Hikari 기본 10), DB CPU·I/O, 같은 row 락에서 막힌다 |
 | 결과 토픽의 직렬성 | 결과 key가 `market_id`(D5)이므로 **한 마켓의 결과는 한 파티션 → 한 thread에서 순차 처리**된다. 완료 판정 경쟁을 없애려는 의도이며, 대형 마켓 1개 정산에서는 결과 반영이 병목이 될 수 있다 (§15.2 실험에서 요청 처리와 결과 반영 시간을 분리해 확인) |
 
@@ -161,7 +165,7 @@ item 멱등성 키는 기존 형식을 그대로 쓴다.
 
 | 상황 | 처리 |
 |---|---|
-| MP 일시 장애 (DB 연결 실패 등) | consumer 재시도 (backoff). 메시지는 커밋되지 않으므로 유실 없음 |
+| MP 일시 장애 (DB 연결 실패 등) | consumer 재시도 (backoff). 메시지는 커밋되지 않으므로 유실 없음. DB 장애로 확인되면 DLT 대신 복구까지 대기 (§16.2) |
 | MP 영구 실패 (예: 회원 없음) | 실패 결과 이벤트 발행 → Market detail `FAILED`. 관리자 확인 대상 |
 | 처리 불가 메시지 (깨진 JSON, 모르는 eventType/schemaVersion) | 재시도 없이 즉시 DLT |
 | Debezium / Kafka 중단 | outbox row가 DB에 남아 있으므로 재기동 후 binlog 위치부터 재발행 |
@@ -173,6 +177,7 @@ item 멱등성 키는 기존 형식을 그대로 쓴다.
 |---|---|---|---|
 | R1 | MP 요청 consumer | 4회 지수 backoff (1s→2s→4s→8s) 후 `market.point-requests-dlt`. `NonRetryableEventException`은 즉시 DLT | 구현 완료 (2단계) |
 | R2 | Market 결과 consumer | R1과 동일 정책, `memberpoint.point-results-dlt` | 3단계 |
+| R8 | DB 장애 (R1·R2 공통) | 처리 실패 직후 `SELECT 1`도 실패하면 DB 장애로 보고 DLT로 보내지 않는다. 30초 간격으로 최대 1시간(실제 경과 시간) 대기 후에도 실패하면 DLT | 완료 (§16.2) |
 | R3 | DLT 처리 | **자동 재처리하지 않는다.** 원인 해결 후 스크립트로 원 토픽에 재발행. 소비 측이 멱등하므로 재발행해도 안전 | 완료 (5단계, `scripts/cdc/replay-dlt.sh`) |
 | R5 | 관리자 수동 재시도 API (`POST /refunds/retry`, `/settlements/retry`) | async 모드에서는 Feign 호출 대신, 대상 detail(`FAILED`, 정체된 `PENDING`)에 대해 **같은 item 멱등성 키 + 새 eventId**로 outbox 이벤트를 다시 기록한다 | 3단계 (환불), 4단계 (정산) |
 | R6 | 커넥터 장애 | outbox에 남아 있어 유실 없음. Connect REST로 상태 확인 후 재시작 (`INFRA_GUIDE.md`) | 완료 (5단계, `scripts/cdc/health.sh`, `INFRA_GUIDE.md`) |
@@ -228,11 +233,24 @@ async 모드에서 `MarketRefundRetryScheduler`(및 4단계 이후 `MarketSettle
 | E2 | 스키마 관리 | `contracts/events/*.schema.json` (JSON Schema 2020-12)을 Git으로 관리, 양쪽 서비스 계약 테스트로 검증 | 형상 관리는 Git이 담당 |
 | E3 | Schema Registry | 지금은 두지 않는다. 이후 **CI에서 Registry 호환성 검사**를 추가한다 | outbox 구조에서는 Debezium이 발행하므로 Registry 거부가 DB 커밋 이후 발생 → 커넥터 정지. 배포 전(CI)에 거르는 것이 안전 |
 | E4 | eventId | UUID | 서비스 간 추적, 요청-결과 연결 |
-| E5 | 이벤트 타입 | 토픽 하나에 `eventType`으로 구분 | 같은 회원의 환불·정산 이벤트 간 순서 보장은 같은 토픽·파티션에서만 성립 (D4 전제) |
+| E5 | 이벤트 타입 | 현재: 토픽 하나에 `eventType`으로 구분. **변경 결정: 요청 토픽을 업무 흐름별로 분리** (정산 지급 / 환불), 결과 토픽은 하나 유지 (아래 "토픽과 타입 필드의 경계") | ~~같은 회원의 환불·정산 이벤트 간 순서 보장은 같은 토픽·파티션에서만 성립~~ (정정: 두 흐름 사이에 순서가 필요한 규칙이 없고, 정합성은 순서가 아니라 멱등성 키 + 단조 상태 전이로 보장된다. §3.2) |
 | E6 | 금액 | 문자열 (`"300.00"`), **항상 양수** | `BigDecimal` 정밀도 보존. 적립/차감 방향은 `eventType`이 결정 (부호 오류로 환불이 차감되는 사고 방지) |
 | E7 | 시각 | ISO-8601 문자열, offset 포함 | Debezium의 `DATETIME` epoch 변환(9시간 어긋남)을 payload에서 회피 |
 
 차감(`spend`)은 동기 유지이므로 이 토픽에 들어오지 않는다. 현재 요청 토픽의 이벤트는 모두 적립(+)이다.
+
+**토픽과 타입 필드의 경계 (E5 정정)**
+
+한 토픽 안에서 타입 필드로 하위 스키마를 나누는 것이 항상 안티패턴은 아니다. 기준은 "같은 대상의 생명주기인가, 서로 다른 업무 흐름인가"다.
+
+| | 한 토픽 + 타입 필드가 맞는 경우 | 토픽을 나눠야 하는 경우 |
+|---|---|---|
+| 의미 | 같은 aggregate의 상태 변화 (예: 주문 생성 → 결제 → 배송) | 발생 조건·빈도·소비 측 처리가 다른 별개 흐름 |
+| 예 | `memberpoint.point-results`: "MP 적립 결과"라는 하나의 사실 (`POINT_CREDITED` / `POINT_CREDIT_FAILED`) | 정산 지급(마켓마다 반드시 발생, 대량)과 무효 환불(예외적, 소량) |
+| 나누지 않을 때 문제 | — | 소비자가 필요 없는 타입까지 받아 걸러야 함, 흐름별 lag·DLT·재처리를 따로 볼 수 없음, 한 흐름의 대량 처리가 다른 흐름을 지연시킴 |
+
+결정: 요청 토픽을 `market.settlement-payout-requests` / `market.refund-requests`로 나눈다 (outbox `aggregate_type`으로 라우팅). 결과 토픽은 하나로 유지한다.
+별도 커밋으로 진행하며, 스키마·계약 테스트와 소규모 E2E(MP 재기동 포함)로 회귀를 확인한다.
 
 ### 8.2 공통 envelope
 
@@ -379,6 +397,8 @@ CREATE TABLE market_outbox_event (          -- member-point: point_outbox_event
 | 3 | **환불 결과 방향** — **완료**: MP outbox (Flyway V2, JdbcTemplate), 결과 이벤트, Market consumer 완료 판정 (R2), async 수동 재시도 outbox 재기록 (R5) | 무효 → `VOIDED` 자동 완료, MP 중단·재기동 후에도 유실 없음, 수동 재시도가 Feign을 호출하지 않음 |
 | 4 | **정산 적용** — **완료** (§14): 2~3 구조를 정산에 적용, 패자 처리 시점(S1), 결과 반영 가드(S2), 정체 PENDING 감지·재시도(S3, 두 모드) | 정산 → `SETTLED` 자동 완료, 패자는 준비 직후 `SETTLED`, reputation task 1회 생성, 금액이 sync와 동일, 기존 정산 테스트 통과 |
 | 5 | 정리: DLT 재발행 스크립트 (R3), DLT 경고·lag·커넥터 점검 절차 (R6, §6.3), outbox 삭제 (R7), 실험 수행 및 결과 기록 | 전체 테스트, 실험 결과 문서화 |
+| 5+ | **결과 반영 배치화 + DB 장애 대기** — **완료** (§16): Market 결과 consumer batch listener, 배치 내 실패 격리, 두 consumer의 DB 장애 대기 (R8) | 정합성 테스트, suite before/after, 장애 주입 E2E (`EXPERIMENT_RESULTS.md` ⑥) |
+| 5++ | **요청 토픽 분리** (§8.1 E5): 정산 지급 / 환불 요청 토픽 분리, 결과 토픽 유지 | 스키마·계약 테스트, 소규모 E2E, MP 재기동 |
 | 6 | **spend 펜싱** (§12.6): MP `POST /internal/api/v1/points/spend/fence`, Market 대사 `NOT_FOUND` 처리 변경 | 펜싱 후 늦게 도착한 spend가 차감하지 못함, 펜싱과 spend 동시 실행 시 결과가 하나로 결정됨 |
 
 환불을 먼저 하는 이유: 원금 반환이라 금액 계산이 없고, 정산은 배당 계산·잔여 소각·reputation task 생성이 얽혀 있다.
@@ -450,7 +470,7 @@ T3 [Market TX]  detail SUCCESS / FAILED, 전부 SUCCESS면 완료               
 
 | 실패 지점 | 처리 |
 |---|---|
-| T2 일시 장애 | consumer 재시도 → DLT (§6). outbox와 멱등성 키로 유실·중복 없음 |
+| T2 일시 장애 | consumer 재시도 → DLT (§6). DB 장애는 DLT 대신 대기 (§16.2). outbox와 멱등성 키로 유실·중복 없음 |
 | T2 영구 실패 (`MEMBER_NOT_FOUND` 등) | `POINT_CREDIT_FAILED` 결과 → detail `FAILED`, 관리자 처리 |
 | T3 실패 | 결과 이벤트 재전달로 재시도 (Market 반영은 멱등) |
 
@@ -791,7 +811,9 @@ MP:     해당 예측들의 SETTLE_MARKET 이력 = N건 (중복 없음), Σ amou
 
 ---
 
-## 16. 결과 반영 배치화 (결정, 실패 처리 설계 예정)
+## 16. 결과 반영 배치화 (구현·검증 완료)
+
+결과: `EXPERIMENT_RESULTS.md` ⑥. async + member_id, N=1,000에서 Market 완료 30.7s → 15.7s, MP→Market 간격 16.8s → 0.35s, Market COMMIT 약 1,000회 → 60회. 병목은 MP 쪽(회원별 트랜잭션)으로 이동했다.
 
 근거: `EXPERIMENT_RESULTS.md` ⑤ 병목 분석. async 결과 반영 시간의 대부분이 **이벤트당 COMMIT(fsync)** 이다 (Market 1,001회 × 13.3ms). 완료 판정 COUNT는 누적 0.59s로 병목이 아니다.
 
@@ -823,12 +845,13 @@ poll (최대 max.poll.records건)
 |---|---|---|
 | Q1 | 실패 구분 | **처리 불가**(깨진 JSON, 모르는 타입·버전, 필수 필드 누락, detail 없음): 그 건만 DLT, 재시도 없음. **일시 장애**(DB 연결, 락 timeout, 데드락 희생): 배치 재시도 |
 | Q2 | 처리 불가 건 분리 | ① 파싱 단계 실패는 트랜잭션 전에 제외. ② detail 없음은 예외로 롤백하지 않고 결과로 수집해 나머지를 커밋. **순서: DB 커밋 → DLT → offset 커밋.** offset이 마지막이므로 어디서 중단돼도 같은 배치가 다시 오고, 반영은 멱등이라 유실 없음 (DLT 중복은 가능하나 무해) |
-| Q3 | poison pill | 알 수 없는 예외 → 배치 재시도 2회 (짧은 backoff) → 그래도 실패하면 **이 배치만 건 단위 트랜잭션으로 fallback** → 원인 건만 기존 정책(4회 재시도 후 DLT)으로 격리. 진짜 DB 장애는 건 단위에서도 모두 실패하므로 DLT로 보내지 않고 대기 |
+| Q3 | poison pill | 알 수 없는 예외 → 배치 재시도 2회 (짧은 backoff) → 그래도 실패하면 **이 배치만 건 단위 트랜잭션으로 fallback** → 원인 건만 기존 정책(4회 재시도 후 DLT)으로 격리. ~~진짜 DB 장애는 건 단위에서도 모두 실패하므로 DLT로 보내지 않고 대기~~ (정정: 이 구조만으로는 장애가 약 10분을 넘으면 DLT로 간다. 실패마다 DB 상태를 확인해 장애와 메시지 문제를 구분한다 → §16.2) |
 | Q4 | 배치 크기·순서 | `max.poll.records = 100` (`KAFKA_MAX_POLL_RECORDS`). poll은 그 순간 도착한 만큼만 가져오므로 한가할 때 추가 지연 없음. 배치 안에서 **받은 순서대로 순차 반영** (정렬·dedup·병렬 금지) + SUCCESS 종결 가드로 이중 보장. 완료 판정은 배치당, 등장한 정산·무효마다 1회 |
 | Q5 | 락 | 현재 데드락 경로 없음 (market마다 writer 1개, R5는 market 1개만 잠금). 방어로 **배치 시작 시 배치의 market을 ID 오름차순으로 선잠금**, 처리 순서는 받은 순서. 규칙: 여러 market을 잠그는 코드는 ID 오름차순. 배치 트랜잭션 약 0.2초, 사용자 영향 없음 |
-| Q6 | 검증 | 정합성 테스트(배치 반영, 순서, 다중 market, 처리 불가 ①②, poison pill, 진짜 장애, 락 순서) + suite 재실행 before/after (Market 완료 시간, MP→Market 간격, COMMIT 횟수, spend 간섭 불변) + 장애 주입 E2E (DB 트리거 poison pill, `docker pause` DB 일시 장애, MP·consumer 중단) |
+| Q6 | 검증 | 정합성 테스트(배치 반영, 순서, 다중 market, 처리 불가 ①②, poison pill, 진짜 장애, 락 순서) + suite 재실행 before/after (Market 완료 시간, MP→Market 간격, COMMIT 횟수, spend 간섭 불변) + 장애 주입 E2E (DB 트리거 poison pill, DB 계정 잠금으로 짧은·긴 장애, poison + 장애 동시, MP DB 장애). 수행 결과 ⑥. `docker pause`는 연결이 응답 없이 멈춰 장애 시점 판단이 어려워 계정 잠금으로 대체. consumer 중단은 미수행 (Connect 정지는 계획 외로 관찰) |
 
 구현 수단: Spring Kafka batch listener + `BatchListenerFailedException(index)`. 처리 불가 건이나 poison pill의 위치를 error handler에 알려 주면, 그 앞 건의 offset은 확정되고 해당 건만 기존 `DefaultErrorHandler` 정책(NonRetryable 즉시, 그 외 4회 재시도 후 `LoggingDeadLetterRecoverer`)으로 처리된다. 그 뒤 건은 다시 전달되어 멱등하게 재반영된다.
+실제 코드는 원인별 하위 타입(`PointResultRecordFailedException` / `DatabaseUnavailableException`)으로 던진다 (§16.2). `LoggingDeadLetterRecoverer`는 이 래퍼를 벗겨 실제 원인을 로그에 남긴다.
 
 | 선택 과제 | 내용 |
 |---|---|
@@ -836,3 +859,43 @@ poll (최대 max.poll.records건)
 | `max.poll.records` sweep | 50 / 100 / 500 |
 
 검토 후 보류: **이벤트 직렬화를 Avro 등 바이너리로 변경.** JSON 파싱은 이벤트당 수~수십 μs로 추정되어 이벤트당 COMMIT 13ms 대비 0.1% 미만이다. 바이너리 포맷의 주된 이득(메시지 크기, 스키마 진화 강제)은 현재 규모의 병목과 무관하며, Debezium 변환과 Schema Registry 도입 비용이 크다. 스키마 진화 관리(E3)를 강화할 때 다시 검토한다.
+
+### 16.2 DB 장애와 메시지 문제의 구분 (구현)
+
+**발견한 문제** (`EXPERIMENT_RESULTS.md` ⑥ run 18): DB가 죽으면 쿼리가 즉시 실패하지 않고 Hikari `connectionTimeout`(30초)만큼 커넥션을 기다린다.
+배치 시도 3회 + 건 단위 첫 건 ≈ 2분이 한 번의 전달이고, error handler 재전달 4회를 더하면 **약 10분 넘는 장애는 레코드가 DLT로 간다**.
+DLT는 문제 데이터를 격리하는 곳인데 인프라 장애 때문에 쌓이면 수동 재처리가 필요해진다.
+
+**왜 예외 종류로 나누지 않는가**: 같은 장애가 `TransactionSystemException`(rollback 실패), `CannotCreateTransactionException`, `UncategorizedSQLException` 등으로 다르게 나타난다.
+예외 목록을 아무리 좁혀도 빈틈이 생기고, 문제 데이터를 장애로 잘못 분류하면 그 파티션이 멈춘다 (결과 key가 `market_id`라 같은 파티션의 다른 마켓 정산도 함께).
+
+**결정: 실패한 메시지가 아니라 DB 상태를 직접 확인한다.**
+
+```text
+처리 실패
+  └ SELECT 1 (같은 커넥션 풀)
+      ├ 실패 → DB 장애 → DatabaseUnavailableException → 30초 간격 대기, 최대 1시간 (실제 경과 시간)
+      └ 성공 → DB는 살아 있는데 실패 = 메시지 문제 → 기존 정책 (NonRetryable 즉시, 그 외 4회 재시도 후 DLT)
+```
+
+- 메시지는 `SELECT 1`을 실패시킬 수 없으므로 **문제 데이터가 무한 대기로 빠지는 경로가 구조적으로 없다.**
+- 잘못 판단하는 방향은 "장애인데 DLT" 뿐이다 (DB가 깜빡이며 살아났다 죽었다 하는 경우). 결과는 이전과 같고 `replay-dlt.sh`로 복구된다.
+- 1시간 상한은 판단 로직의 버그가 파티션을 영원히 멈추지 않게 하는 안전망이다. 넘으면 DLT + ERROR 로그.
+
+| 항목 | Market 결과 consumer (batch) | MP 요청 consumer (record) |
+|---|---|---|
+| 확인 시점 | 배치 시도·건 단위 처리 실패마다. 장애면 **남은 배치 재시도와 건 단위 fallback을 하지 않는다** (시도마다 커넥션 대기 30초가 곱해짐) | `process` 실패마다 |
+| 장애 예외 | `DatabaseUnavailableException extends BatchListenerFailedException` (배치의 첫 미처리 건 index) | `DatabaseUnavailableException extends Exception` (checked) |
+| 일반 실패 | `PointResultRecordFailedException extends BatchListenerFailedException` | 원래 예외 그대로 |
+| 설정 | `market.kafka.point-results.db-unavailable.{retry-interval-ms, max-wait-ms}` | `member-point.kafka.market-point-requests.db-unavailable.{retry-interval-ms, max-wait-ms}` |
+
+**예외 타입을 이렇게 나눈 이유**: `DefaultErrorHandler`는 같은 offset의 재시도 상태(남은 횟수, backoff)를 실패 원인이 바뀌었을 때만 새로 시작하며(`resetStateOnExceptionChange`),
+그 판단을 `새 예외 클래스.isInstance(이전 예외)`로 한다. 장애 대기 중이던 레코드가 DB 복구 후 문제 데이터로 밝혀지면 상태가 새로 시작되어야 4회 후 DLT로 간다.
+
+- Market: 두 경우 모두 `BatchListenerFailedException`이면 같은 원인으로 판단되어 **문제 데이터가 1시간 대기에 묶인다.** 형제 하위 타입으로 나눠 양방향 모두 바뀜을 감지한다.
+- MP: 장애 예외가 `RuntimeException`을 상속하면 DB 복구 후 맨 `RuntimeException` 실패(MP에 `RequestHashUtil`, `CryptoUtil` 등 실제로 존재)가 같은 원인으로 판단된다. checked 예외로 두어 상속 관계가 겹치지 않게 한다.
+- 두 경우 모두 이전 방식으로 바꾸면 실패하는 테스트로 확인했다 (`KafkaConsumerConfigTest`, 실제 `DefaultErrorHandler` 사용).
+
+**poll 간격 제약**: 대기는 consumer thread에서 하므로 한 사이클(시도 ≤30초 + 확인 ≤30초 + 대기 30초 ≈ 90초)이 `max.poll.interval.ms`(5분)보다 짧아야 리밸런스가 없다. 대기 간격을 늘릴 때 이 제약을 지킨다.
+
+**남은 과제**: run 도중 Kafka Connect 정지는 자동 감지되지 않는다 (`health.sh`는 수동·run 전 점검). outbox에 남아 유실은 없지만 지연을 알아채려면 커넥터 상태 경보가 필요하다.

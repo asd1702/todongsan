@@ -293,16 +293,27 @@ public class MarketSettlementTransactionService {
             boolean credited,
             String errorCode
     ) {
-        LocalDateTime now = LocalDateTime.now();
         // 락 순서: market → detail → market_settlement (prepareSettlement / prepareSettlementRetry와 동일)
         if (marketMapper.lockMarketById(marketId) == null) {
             return PointResultApplyOutcome.DETAIL_NOT_FOUND;
         }
+        AppliedPointResult applied = applySettlementResultItem(idempotencyKey, credited, errorCode);
+        if (applied.parentId() != null) {
+            completeSettlementIfDone(marketId, applied.parentId());
+        }
+        return applied.outcome();
+    }
+
+    /**
+     * 호출자의 트랜잭션 안에서 정산 결과 1건을 detail에 반영한다.
+     * market row 잠금과 완료 판정은 호출자가 한다 (배치 반영, ASYNC_POINT_FLOW.md §16.1).
+     */
+    public AppliedPointResult applySettlementResultItem(String idempotencyKey, boolean credited, String errorCode) {
+        LocalDateTime now = LocalDateTime.now();
         MarketSettlementDetail detail = marketMapper.selectSettlementDetailByIdempotencyKeyForUpdate(idempotencyKey);
         if (detail == null) {
-            return PointResultApplyOutcome.DETAIL_NOT_FOUND;
+            return AppliedPointResult.detailNotFound();
         }
-
         int updatedRows = credited
                 ? marketMapper.updateRetrySettlementDetailStatus(detail.getId(), TransactionItemStatus.SUCCESS, null, now)
                 : marketMapper.updateRetrySettlementDetailStatus(
@@ -314,15 +325,22 @@ public class MarketSettlementTransactionService {
         if (credited && updatedRows == 1) {
             marketMapper.settlePrediction(detail.getPredictionId(), detail.getSettledAmount(), now);
         }
+        return new AppliedPointResult(
+                updatedRows == 1 ? PointResultApplyOutcome.APPLIED : PointResultApplyOutcome.SKIPPED,
+                detail.getSettlementId()
+        );
+    }
 
-        if (marketMapper.countNonSuccessSettlementDetails(detail.getSettlementId()) == 0) {
-            marketMapper.completeMarketSettlement(detail.getSettlementId(), now);
+    /** 호출자의 트랜잭션 안에서 정산 완료 여부를 판정하고, 완료면 정산·마켓 완료와 reputation task를 만든다. */
+    public void completeSettlementIfDone(long marketId, long settlementId) {
+        LocalDateTime now = LocalDateTime.now();
+        if (marketMapper.countNonSuccessSettlementDetails(settlementId) == 0) {
+            marketMapper.completeMarketSettlement(settlementId, now);
             marketMapper.completeMarket(marketId, now);
             createReputationUpdateTasksForSettledMarket(marketId, now);
         } else {
-            marketMapper.touchMarketSettlement(detail.getSettlementId(), now);
+            marketMapper.touchMarketSettlement(settlementId, now);
         }
-        return updatedRows == 1 ? PointResultApplyOutcome.APPLIED : PointResultApplyOutcome.SKIPPED;
     }
 
     @Transactional

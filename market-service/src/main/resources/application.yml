@@ -11,6 +11,8 @@ spring:
     consumer:
       group-id: market-service
       auto-offset-reset: earliest
+      # 결과 반영 배치 크기 상한 (ASYNC_POINT_FLOW.md §16.1 Q4). poll은 도착한 만큼만 가져온다
+      max-poll-records: ${KAFKA_MAX_POLL_RECORDS:100}
     listener:
       # 파티션 수(3)와 맞춘다. 실제 병렬도 = min(concurrency, 파티션 수) (ASYNC_POINT_FLOW.md §3.3)
       concurrency: ${KAFKA_LISTENER_CONCURRENCY:3}
@@ -54,6 +56,10 @@ market:
       # Member-Point 결과 이벤트 consumer. 전송 방식과 별도로 켠다 (sync로 되돌려도 이미 나간 요청의 결과는 반영해야 한다)
       enabled: ${MARKET_POINT_RESULTS_CONSUMER_ENABLED:false}
       topic: memberpoint.point-results
+      # DB 장애(실패 직후 SELECT 1도 실패) 시 DLT 대신 기다린다. 한 번의 대기는 max.poll.interval.ms(5분)보다 짧아야 한다 (ASYNC_POINT_FLOW.md §16.1 Q3)
+      db-unavailable:
+        retry-interval-ms: ${MARKET_POINT_RESULTS_DB_RETRY_INTERVAL_MS:30000}
+        max-wait-ms: ${MARKET_POINT_RESULTS_DB_MAX_WAIT_MS:3600000}
   scheduler:
     prediction-reconciliation:
       enabled: true

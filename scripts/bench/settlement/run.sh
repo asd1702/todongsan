@@ -34,11 +34,13 @@ mkdir -p "$RUN_DIR"
 mysql_q() { # mysql_q <container> <password> <db> <sql>
   docker exec -i -e MYSQL_PWD="$2" "$1" mysql -uroot -N "$3" -e "$4" 2>/dev/null
 }
-lock_stats() { # lock_stats <container> <password> → "waits time_ms deadlocks"
+lock_stats() { # lock_stats <container> <password> → "waits time_ms deadlocks commits"
   mysql_q "$1" "$2" information_schema "
     SELECT (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_row_lock_waits'),
            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_row_lock_time'),
-           (SELECT COUNT FROM information_schema.INNODB_METRICS WHERE NAME = 'lock_deadlocks');" | tr '\t' ' '
+           (SELECT COUNT FROM information_schema.INNODB_METRICS WHERE NAME = 'lock_deadlocks'),
+           (SELECT COUNT_STAR FROM performance_schema.events_statements_summary_global_by_event_name
+             WHERE EVENT_NAME = 'statement/sql/commit');" | tr '\t' ' '
 }
 poll() { # poll <container> <password> <db> <sql: 조건 충족 시 1> → 완료 시각(epoch ms, VM 시계) 또는 timeout
   docker exec -i -e MYSQL_PWD="$2" "$1" sh -s <<EOF
@@ -56,8 +58,8 @@ echo "== run=$run mode=$MODE key=$KEY N=$n rate=$rate ${label:+label=$label}"
 "$DIR/seed.sh" market "$run" "$n" | tee "$RUN_DIR/seed.txt"
 losers=$(awk -F'losers=' '{split($2, a, " "); print a[1]}' "$RUN_DIR/seed.txt")
 
-read -r mp_w0 mp_t0 mp_d0 <<< "$(lock_stats member-point-mysql "$MP_PW")"
-read -r mk_w0 mk_t0 mk_d0 <<< "$(lock_stats market-mysql "$MARKET_PW")"
+read -r mp_w0 mp_t0 mp_d0 mp_c0 <<< "$(lock_stats member-point-mysql "$MP_PW")"
+read -r mk_w0 mk_t0 mk_d0 mk_c0 <<< "$(lock_stats market-mysql "$MARKET_PW")"
 
 poll member-point-mysql "$MP_PW" memberpoint \
   "SELECT COUNT(*) >= $n FROM point_history WHERE type = 'SETTLE_MARKET' AND reference_type = 'MARKET_PREDICTION' AND reference_id BETWEEN $pid_lo AND $pid_hi" \
@@ -75,8 +77,8 @@ docker run --rm --name "bench-k6-run$run" \
 wait "$mp_poller" "$market_poller" || true
 mp_done="$(tr -d '\r\n' < "$RUN_DIR/mp_done")"; market_done="$(tr -d '\r\n' < "$RUN_DIR/market_done")"
 
-read -r mp_w1 mp_t1 mp_d1 <<< "$(lock_stats member-point-mysql "$MP_PW")"
-read -r mk_w1 mk_t1 mk_d1 <<< "$(lock_stats market-mysql "$MARKET_PW")"
+read -r mp_w1 mp_t1 mp_d1 mp_c1 <<< "$(lock_stats member-point-mysql "$MP_PW")"
+read -r mk_w1 mk_t1 mk_d1 mk_c1 <<< "$(lock_stats market-mysql "$MARKET_PW")"
 
 if "$DIR/verify.sh" "$run" > "$RUN_DIR/verify.txt"; then verify=PASS; else verify=FAIL; fi
 java "$(cygpath -m "$DIR/Analyze.java")" "$(cygpath -m "$RUN_DIR/k6.json")" "${mp_done:-timeout}" "${market_done:-timeout}" > "$RUN_DIR/analysis.txt"
@@ -85,7 +87,7 @@ cat "$RUN_DIR/analysis.txt"
 
 a() { grep -E "^$1=" "$RUN_DIR/analysis.txt" | cut -d= -f2 || echo NA; }
 if [ ! -f "$RESULTS" ]; then
-  echo "timestamp,label,mode,key,run,n,losers,rate,settle_status,settle_api_ms,mp_done_ms,market_done_ms,before_count,before_p50,before_p95,before_p99,during_count,during_p50,during_p95,during_p99,during_max,during_failed,load_truncated,mp_lock_waits,mp_lock_time_ms,mp_deadlocks,market_lock_waits,market_lock_time_ms,market_deadlocks,verify,run_dir" > "$RESULTS"
+  echo "timestamp,label,mode,key,run,n,losers,rate,settle_status,settle_api_ms,mp_done_ms,market_done_ms,before_count,before_p50,before_p95,before_p99,during_count,during_p50,during_p95,during_p99,during_max,during_failed,load_truncated,mp_lock_waits,mp_lock_time_ms,mp_deadlocks,market_lock_waits,market_lock_time_ms,market_deadlocks,mp_commits,market_commits,verify,run_dir" > "$RESULTS"
 fi
-echo "$(date '+%Y-%m-%dT%H:%M:%S'),$label,$MODE,$KEY,$run,$n,$losers,$rate,$settle_status,$(a settle_api_ms),$(a mp_done_ms),$(a market_done_ms),$(a before_count),$(a before_p50),$(a before_p95),$(a before_p99),$(a during_count),$(a during_p50),$(a during_p95),$(a during_p99),$(a during_max),$(a during_failed),$(a load_truncated),$((mp_w1 - mp_w0)),$((mp_t1 - mp_t0)),$((mp_d1 - mp_d0)),$((mk_w1 - mk_w0)),$((mk_t1 - mk_t0)),$((mk_d1 - mk_d0)),$verify,$(basename "$RUN_DIR")" >> "$RESULTS"
+echo "$(date '+%Y-%m-%dT%H:%M:%S'),$label,$MODE,$KEY,$run,$n,$losers,$rate,$settle_status,$(a settle_api_ms),$(a mp_done_ms),$(a market_done_ms),$(a before_count),$(a before_p50),$(a before_p95),$(a before_p99),$(a during_count),$(a during_p50),$(a during_p95),$(a during_p99),$(a during_max),$(a during_failed),$(a load_truncated),$((mp_w1 - mp_w0)),$((mp_t1 - mp_t0)),$((mp_d1 - mp_d0)),$((mk_w1 - mk_w0)),$((mk_t1 - mk_t0)),$((mk_d1 - mk_d0)),$((mp_c1 - mp_c0)),$((mk_c1 - mk_c0)),$verify,$(basename "$RUN_DIR")" >> "$RESULTS"
 echo "verify=$verify settle_status=$settle_status → $RESULTS"

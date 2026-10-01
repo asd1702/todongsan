@@ -447,4 +447,7 @@ public interface MarketMapper {
     MarketRefundDetail selectRefundDetailByIdempotencyKeyForUpdate(@Param("idempotencyKey") String idempotencyKey);
 
     MarketSettlementDetail selectSettlementDetailByIdempotencyKeyForUpdate(@Param("idempotencyKey") String idempotencyKey);
+
+    /** 여러 market을 ID 오름차순으로 잠근다. 존재하는(삭제되지 않은) market ID를 반환한다. */
+    List<Long> lockMarketsByIdsInOrder(@Param("marketIds") List<Long> marketIds);
 }

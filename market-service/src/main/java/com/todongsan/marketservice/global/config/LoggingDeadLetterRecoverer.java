@@ -3,7 +3,9 @@ package com.todongsan.marketservice.global.config;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.springframework.kafka.listener.BatchListenerFailedException;
 import org.springframework.kafka.listener.ConsumerRecordRecoverer;
+import org.springframework.kafka.listener.ListenerExecutionFailedException;
 
 /**
  * DLT 발행 결과를 ERROR 로그로 남긴다 (ASYNC_POINT_FLOW.md §15.1).
@@ -17,7 +19,7 @@ public class LoggingDeadLetterRecoverer implements ConsumerRecordRecoverer {
 
     @Override
     public void accept(ConsumerRecord<?, ?> record, Exception exception) {
-        Throwable cause = exception.getCause() != null ? exception.getCause() : exception;
+        Throwable cause = rootCause(exception);
         try {
             delegate.accept(record, exception);
         } catch (RuntimeException publishFailure) {
@@ -27,5 +29,15 @@ public class LoggingDeadLetterRecoverer implements ConsumerRecordRecoverer {
         }
         log.error("Sent to DLT. topic={}, partition={}, offset={}, key={}, cause={}",
                 record.topic(), record.partition(), record.offset(), record.key(), String.valueOf(cause), cause);
+    }
+
+    /** Spring Kafka의 래퍼 예외(ListenerExecutionFailedException, BatchListenerFailedException)를 벗겨 실제 원인을 찾는다. */
+    private static Throwable rootCause(Exception exception) {
+        Throwable cause = exception;
+        while ((cause instanceof ListenerExecutionFailedException || cause instanceof BatchListenerFailedException)
+                && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        return cause;
     }
 }

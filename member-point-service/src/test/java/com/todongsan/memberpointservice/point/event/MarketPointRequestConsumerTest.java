@@ -12,6 +12,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.math.BigDecimal;
 
@@ -52,15 +54,18 @@ class MarketPointRequestConsumerTest {
     @Mock
     MarketPointRequestService marketPointRequestService;
 
+    @Mock
+    JdbcTemplate jdbcTemplate;
+
     MarketPointRequestConsumer consumer;
 
     @BeforeEach
     void setUp() {
-        consumer = new MarketPointRequestConsumer(new ObjectMapper(), marketPointRequestService);
+        consumer = new MarketPointRequestConsumer(new ObjectMapper(), marketPointRequestService, jdbcTemplate);
     }
 
     @Test
-    void 환불_요청_이벤트를_REFUND_MARKET_적립으로_처리한다() {
+    void 환불_요청_이벤트를_REFUND_MARKET_적립으로_처리한다() throws Exception {
         stubProcessed();
 
         consumer.consume(record(REFUND_EVENT));
@@ -80,7 +85,7 @@ class MarketPointRequestConsumerTest {
     }
 
     @Test
-    void 정산_지급_요청_이벤트는_SETTLE_MARKET_적립으로_처리한다() {
+    void 정산_지급_요청_이벤트는_SETTLE_MARKET_적립으로_처리한다() throws Exception {
         stubProcessed();
         String event = REFUND_EVENT
                 .replace("MARKET_REFUND_REQUESTED", "MARKET_SETTLEMENT_PAYOUT_REQUESTED")
@@ -92,7 +97,7 @@ class MarketPointRequestConsumerTest {
     }
 
     @Test
-    void 모르는_선택_필드는_무시한다() {
+    void 모르는_선택_필드는_무시한다() throws Exception {
         stubProcessed();
         String event = REFUND_EVENT.replace("\"producer\": \"market-service\",",
                 "\"producer\": \"market-service\", \"traceId\": \"abc\",");
@@ -152,12 +157,24 @@ class MarketPointRequestConsumerTest {
     }
 
     @Test
-    void 처리_중_일시_장애는_그대로_전파해_재시도하게_한다() {
-        when(marketPointRequestService.process(any(), any())).thenThrow(new IllegalStateException("db down"));
+    void DB가_살아있는데_처리에_실패하면_그대로_전파해_기본_재시도_후_DLT로_보낸다() {
+        when(marketPointRequestService.process(any(), any())).thenThrow(new IllegalStateException("bad message"));
 
         assertThatThrownBy(() -> consumer.consume(record(REFUND_EVENT)))
                 .isInstanceOf(IllegalStateException.class)
                 .isNotInstanceOf(NonRetryableEventException.class);
+    }
+
+    @Test
+    void 처리_실패_후_DB_상태_확인도_실패하면_DB_장애로_알려_복구를_기다리게_한다() {
+        IllegalStateException failure = new IllegalStateException("connection refused");
+        when(marketPointRequestService.process(any(), any())).thenThrow(failure);
+        when(jdbcTemplate.queryForObject("SELECT 1", Integer.class))
+                .thenThrow(new DataAccessResourceFailureException("db down"));
+
+        assertThatThrownBy(() -> consumer.consume(record(REFUND_EVENT)))
+                .isInstanceOf(DatabaseUnavailableException.class)
+                .hasCause(failure);
     }
 
     private void stubProcessed() {

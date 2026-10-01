@@ -188,21 +188,39 @@ public class MarketRefundTransactionService {
             boolean credited,
             String errorCode
     ) {
-        LocalDateTime now = LocalDateTime.now();
         // 락 순서: market → detail → market_void (prepareRefund / prepareRefundRetry와 동일)
         if (marketMapper.lockMarketById(marketId) == null) {
             return PointResultApplyOutcome.DETAIL_NOT_FOUND;
         }
+        AppliedPointResult applied = applyRefundResultItem(idempotencyKey, credited, errorCode);
+        if (applied.parentId() != null) {
+            completeRefundIfDone(applied.parentId());
+        }
+        return applied.outcome();
+    }
+
+    /**
+     * 호출자의 트랜잭션 안에서 환불 결과 1건을 detail에 반영한다.
+     * market row 잠금과 완료 판정은 호출자가 한다 (배치 반영, ASYNC_POINT_FLOW.md §16.1).
+     */
+    public AppliedPointResult applyRefundResultItem(String idempotencyKey, boolean credited, String errorCode) {
+        LocalDateTime now = LocalDateTime.now();
         MarketRefundDetail detail = marketMapper.selectRefundDetailByIdempotencyKeyForUpdate(idempotencyKey);
         if (detail == null) {
-            return PointResultApplyOutcome.DETAIL_NOT_FOUND;
+            return AppliedPointResult.detailNotFound();
         }
-
         boolean updated = credited
                 ? markRetryRefundSuccess(detail, now)
                 : markRetryRefundFailed(detail, failureReason(errorCode, "MEMBER_POINT_FAILED"), now);
-        resolveRefundStatus(detail.getMarketVoidId(), now);
-        return updated ? PointResultApplyOutcome.APPLIED : PointResultApplyOutcome.SKIPPED;
+        return new AppliedPointResult(
+                updated ? PointResultApplyOutcome.APPLIED : PointResultApplyOutcome.SKIPPED,
+                detail.getMarketVoidId()
+        );
+    }
+
+    /** 호출자의 트랜잭션 안에서 무효 처리의 환불 완료 여부를 판정한다. */
+    public void completeRefundIfDone(long voidId) {
+        resolveRefundStatus(voidId, LocalDateTime.now());
     }
 
     @Transactional(readOnly = true)

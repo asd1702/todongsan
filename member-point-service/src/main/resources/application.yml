@@ -33,6 +33,10 @@ member-point:
       # Market outbox + CDC 비동기 포인트 요청 consumer (docs/architecture/ASYNC_POINT_FLOW.md)
       enabled: ${MARKET_POINT_REQUESTS_CONSUMER_ENABLED:false}
       topic: market.point-requests
+      # DB 장애(실패 직후 SELECT 1도 실패) 시 DLT 대신 기다린다. 한 번의 대기는 max.poll.interval.ms(5분)보다 짧아야 한다 (ASYNC_POINT_FLOW.md §16.1 Q3)
+      db-unavailable:
+        retry-interval-ms: ${MARKET_POINT_REQUESTS_DB_RETRY_INTERVAL_MS:30000}
+        max-wait-ms: ${MARKET_POINT_REQUESTS_DB_MAX_WAIT_MS:3600000}
   outbox-cleanup:
     # point_outbox_event 보존 기간 경과 row 삭제 (ASYNC_POINT_FLOW.md §6.1 R7)
     enabled: ${POINT_OUTBOX_CLEANUP_SCHEDULER_ENABLED:true}

@@ -1,11 +1,14 @@
 package com.todongsan.marketservice.market.event;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -13,60 +16,29 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.todongsan.marketservice.market.service.MarketRefundTransactionService;
 import com.todongsan.marketservice.market.service.MarketSettlementTransactionService;
 import com.todongsan.marketservice.market.service.PointResultApplyOutcome;
+import com.todongsan.marketservice.market.service.PointResultBatchApplier;
+import com.todongsan.marketservice.market.service.PointResultBatchApplier.Item;
+import java.util.ArrayList;
+import java.util.List;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.kafka.listener.BatchListenerFailedException;
 
+/** 배치 결과 반영 흐름 (ASYNC_POINT_FLOW.md §16.1 Q1~Q4). */
 @ExtendWith(MockitoExtension.class)
 class PointResultConsumerTest {
 
     private static final String TOPIC = "memberpoint.point-results";
-    private static final String KEY = "MARKET_REFUND:market:42:prediction:7:member:1001";
 
-    /** docs/architecture/ASYNC_POINT_FLOW.md §8.4 예시와 동일 (consumer 측 계약 확인) */
-    private static final String CREDITED_EVENT = """
-            {
-              "eventId": "c3e8f0d2-1a4b-4f6e-8d7c-5b9a0e2f3c11",
-              "eventType": "POINT_CREDITED",
-              "schemaVersion": 1,
-              "occurredAt": "2026-09-30T18:00:00.456+09:00",
-              "producer": "member-point-service",
-              "data": {
-                "requestEventId": "7f1c2a9e-4b0d-4c5e-9a51-2f7b3c8d1e04",
-                "requestEventType": "MARKET_REFUND_REQUESTED",
-                "marketId": 42,
-                "predictionId": 7,
-                "memberId": 1001,
-                "idempotencyKey": "MARKET_REFUND:market:42:prediction:7:member:1001",
-                "amount": "300.00",
-                "status": "PROCESSED",
-                "balanceSnapshot": "1300.00"
-              }
-            }
-            """;
-
-    private static final String FAILED_EVENT = """
-            {
-              "eventId": "d4f9a1e3-2b5c-4a7f-9e8d-6c0b1f3a4d22",
-              "eventType": "POINT_CREDIT_FAILED",
-              "schemaVersion": 1,
-              "occurredAt": "2026-09-30T18:00:00.456+09:00",
-              "producer": "member-point-service",
-              "data": {
-                "requestEventId": "7f1c2a9e-4b0d-4c5e-9a51-2f7b3c8d1e04",
-                "requestEventType": "MARKET_REFUND_REQUESTED",
-                "marketId": 42,
-                "predictionId": 7,
-                "memberId": 1001,
-                "idempotencyKey": "MARKET_REFUND:market:42:prediction:7:member:1001",
-                "amount": "300.00",
-                "errorCode": "MEMBER_NOT_FOUND"
-              }
-            }
-            """;
+    @Mock
+    private PointResultBatchApplier batchApplier;
 
     @Mock
     private MarketRefundTransactionService refundTransactionService;
@@ -74,130 +46,225 @@ class PointResultConsumerTest {
     @Mock
     private MarketSettlementTransactionService settlementTransactionService;
 
+    @Mock
+    private JdbcTemplate jdbcTemplate;
+
     private PointResultConsumer consumer;
 
     @BeforeEach
     void setUp() {
-        consumer = new PointResultConsumer(new ObjectMapper(), refundTransactionService, settlementTransactionService);
+        consumer = new PointResultConsumer(
+                new ObjectMapper(), batchApplier, refundTransactionService, settlementTransactionService, jdbcTemplate);
     }
 
     @Test
-    void appliesCreditedResultAsSuccess() {
-        when(refundTransactionService.applyAsyncRefundResult(42L, KEY, true, null))
-                .thenReturn(PointResultApplyOutcome.APPLIED);
+    void appliesValidRecordsAsOneBatchInReceivedOrder() {
+        stubBatchApplied();
 
-        consumer.consume(record(CREDITED_EVENT));
+        consumer.consume(records(
+                credited("REFUND", 42, 7),
+                failed("REFUND", 42, 8, "MEMBER_NOT_FOUND"),
+                credited("SETTLEMENT", 77, 9)
+        ));
 
-        verify(refundTransactionService).applyAsyncRefundResult(42L, KEY, true, null);
+        List<Item> items = appliedItems();
+        assertThat(items).extracting(Item::idempotencyKey).containsExactly(key("REFUND", 42, 7), key("REFUND", 42, 8),
+                key("SETTLEMENT", 77, 9));
+        assertThat(items).extracting(Item::credited).containsExactly(true, false, true);
+        assertThat(items.get(1).errorCode()).isEqualTo("MEMBER_NOT_FOUND");
+        assertThat(items.get(2).requestEventType()).isEqualTo("MARKET_SETTLEMENT_PAYOUT_REQUESTED");
     }
 
     @Test
-    void appliesFailedResultWithErrorCode() {
-        when(refundTransactionService.applyAsyncRefundResult(42L, KEY, false, "MEMBER_NOT_FOUND"))
-                .thenReturn(PointResultApplyOutcome.APPLIED);
+    void keepsOrderOfSameKeyWithinBatch() {
+        stubBatchApplied();
 
-        consumer.consume(record(FAILED_EVENT));
+        consumer.consume(records(failed("REFUND", 42, 7, "MEMBER_NOT_FOUND"), credited("REFUND", 42, 7)));
 
-        verify(refundTransactionService).applyAsyncRefundResult(42L, KEY, false, "MEMBER_NOT_FOUND");
+        assertThat(appliedItems()).extracting(Item::credited).containsExactly(false, true);
     }
 
     @Test
-    void redeliveredResultIsNotAnError() {
-        when(refundTransactionService.applyAsyncRefundResult(42L, KEY, true, null))
-                .thenReturn(PointResultApplyOutcome.SKIPPED);
+    void malformedRecordIsExcludedAndReportedWithItsIndexAfterCommit() {
+        stubBatchApplied();
 
-        consumer.consume(record(CREDITED_EVENT));
+        assertThatThrownBy(() -> consumer.consume(records(credited("REFUND", 42, 7), "{not-json", credited("REFUND", 42, 8))))
+                .isInstanceOfSatisfying(BatchListenerFailedException.class, e -> {
+                    assertThat(e.getIndex()).isEqualTo(1);
+                    assertThat(e.getCause()).isInstanceOf(NonRetryableEventException.class);
+                });
 
-        verify(refundTransactionService).applyAsyncRefundResult(42L, KEY, true, null);
+        assertThat(appliedItems()).extracting(Item::idempotencyKey).containsExactly(key("REFUND", 42, 7), key("REFUND", 42, 8));
     }
 
     @Test
-    void missingDetailGoesToDltWithoutRetry() {
-        when(refundTransactionService.applyAsyncRefundResult(42L, KEY, true, null))
-                .thenReturn(PointResultApplyOutcome.DETAIL_NOT_FOUND);
+    void detailNotFoundIsReportedAsNonRetryableWithoutRollingBackOthers() {
+        when(batchApplier.applyBatch(any())).thenReturn(List.of(
+                PointResultApplyOutcome.APPLIED, PointResultApplyOutcome.DETAIL_NOT_FOUND, PointResultApplyOutcome.APPLIED));
 
-        assertThatThrownBy(() -> consumer.consume(record(CREDITED_EVENT)))
-                .isInstanceOf(NonRetryableEventException.class)
-                .hasMessageContaining("Detail not found");
+        assertThatThrownBy(() -> consumer.consume(records(credited("REFUND", 42, 7), credited("REFUND", 42, 8),
+                credited("REFUND", 42, 9))))
+                .isInstanceOfSatisfying(BatchListenerFailedException.class, e -> {
+                    assertThat(e.getIndex()).isEqualTo(1);
+                    assertThat(e.getCause()).isInstanceOf(NonRetryableEventException.class)
+                            .hasMessageContaining("Detail not found");
+                });
+        verify(batchApplier, times(1)).applyBatch(any());
     }
 
     @Test
-    void settlementResultIsRoutedToSettlement() {
-        String settlementKey = "MARKET_SETTLEMENT_REWARD:market:42:prediction:7:member:1001";
-        String event = CREDITED_EVENT
-                .replace("MARKET_REFUND_REQUESTED", "MARKET_SETTLEMENT_PAYOUT_REQUESTED")
-                .replace(KEY, settlementKey);
-        when(settlementTransactionService.applyAsyncSettlementResult(42L, settlementKey, true, null))
-                .thenReturn(PointResultApplyOutcome.APPLIED);
+    void reportsEarliestFailureIndexWhenSeveralRecordsFail() {
+        when(batchApplier.applyBatch(any())).thenReturn(List.of(
+                PointResultApplyOutcome.APPLIED, PointResultApplyOutcome.DETAIL_NOT_FOUND, PointResultApplyOutcome.APPLIED));
 
-        consumer.consume(record(event));
-
-        verify(settlementTransactionService).applyAsyncSettlementResult(42L, settlementKey, true, null);
-        verifyNotApplied();
+        assertThatThrownBy(() -> consumer.consume(records(credited("REFUND", 42, 7), credited("REFUND", 42, 8),
+                credited("REFUND", 42, 9), "{not-json")))
+                .isInstanceOfSatisfying(BatchListenerFailedException.class, e -> assertThat(e.getIndex()).isEqualTo(1));
     }
 
     @Test
-    void unknownRequestEventTypeGoesToDlt() {
-        String event = CREDITED_EVENT.replace("MARKET_REFUND_REQUESTED", "MARKET_SPEND_REQUESTED");
+    void unsupportedRequestEventTypeIsNonRetryable() {
+        stubBatchApplied();
+        String event = credited("REFUND", 42, 8).replace("MARKET_REFUND_REQUESTED", "MARKET_SPEND_REQUESTED");
 
-        assertThatThrownBy(() -> consumer.consume(record(event)))
-                .isInstanceOf(NonRetryableEventException.class)
-                .hasMessageContaining("MARKET_SPEND_REQUESTED");
-        verifyNotApplied();
-        verify(settlementTransactionService, never())
-                .applyAsyncSettlementResult(anyLong(), anyString(), anyBoolean(), any());
+        assertThatThrownBy(() -> consumer.consume(records(credited("REFUND", 42, 7), event)))
+                .isInstanceOfSatisfying(BatchListenerFailedException.class, e -> {
+                    assertThat(e.getIndex()).isEqualTo(1);
+                    assertThat(e.getCause()).hasMessageContaining("MARKET_SPEND_REQUESTED");
+                });
     }
 
     @Test
-    void unknownEventTypeGoesToDlt() {
-        String event = CREDITED_EVENT.replace("\"POINT_CREDITED\"", "\"POINT_DEBITED\"");
+    void transientBatchFailureIsRetriedWithoutFallback() {
+        when(batchApplier.applyBatch(any()))
+                .thenThrow(new IllegalStateException("db blip"))
+                .thenReturn(List.of(PointResultApplyOutcome.APPLIED));
 
-        assertThatThrownBy(() -> consumer.consume(record(event)))
-                .isInstanceOf(NonRetryableEventException.class);
-        verifyNotApplied();
-    }
+        consumer.consume(records(credited("REFUND", 42, 7)));
 
-    @Test
-    void unsupportedSchemaVersionGoesToDlt() {
-        String event = CREDITED_EVENT.replace("\"schemaVersion\": 1", "\"schemaVersion\": 2");
-
-        assertThatThrownBy(() -> consumer.consume(record(event)))
-                .isInstanceOf(NonRetryableEventException.class);
-        verifyNotApplied();
-    }
-
-    @Test
-    void malformedJsonGoesToDlt() {
-        assertThatThrownBy(() -> consumer.consume(record("{not-json")))
-                .isInstanceOf(NonRetryableEventException.class);
-        verifyNotApplied();
-    }
-
-    @Test
-    void missingRequiredFieldGoesToDlt() {
-        String event = CREDITED_EVENT.replace("\"marketId\": 42", "\"marketId\": null");
-
-        assertThatThrownBy(() -> consumer.consume(record(event)))
-                .isInstanceOf(NonRetryableEventException.class)
-                .hasMessageContaining("Required field is missing");
-        verifyNotApplied();
-    }
-
-    @Test
-    void transientFailureIsPropagatedForRetry() {
-        when(refundTransactionService.applyAsyncRefundResult(anyLong(), anyString(), anyBoolean(), any()))
-                .thenThrow(new IllegalStateException("db down"));
-
-        assertThatThrownBy(() -> consumer.consume(record(CREDITED_EVENT)))
-                .isInstanceOf(IllegalStateException.class)
-                .isNotInstanceOf(NonRetryableEventException.class);
-    }
-
-    private void verifyNotApplied() {
+        verify(batchApplier, times(2)).applyBatch(any());
         verify(refundTransactionService, never()).applyAsyncRefundResult(anyLong(), anyString(), anyBoolean(), any());
     }
 
-    private ConsumerRecord<String, String> record(String value) {
-        return new ConsumerRecord<>(TOPIC, 0, 0L, "42", value);
+    @Test
+    void fallsBackToPerRecordWhenBatchKeepsFailing() {
+        when(batchApplier.applyBatch(any())).thenThrow(new IllegalStateException("persistent"));
+        when(refundTransactionService.applyAsyncRefundResult(anyLong(), anyString(), anyBoolean(), any()))
+                .thenReturn(PointResultApplyOutcome.APPLIED);
+        when(settlementTransactionService.applyAsyncSettlementResult(anyLong(), anyString(), anyBoolean(), any()))
+                .thenReturn(PointResultApplyOutcome.APPLIED);
+
+        consumer.consume(records(credited("REFUND", 42, 7), credited("SETTLEMENT", 77, 9)));
+
+        verify(batchApplier, times(PointResultConsumer.BATCH_ATTEMPTS)).applyBatch(any());
+        verify(refundTransactionService).applyAsyncRefundResult(42L, key("REFUND", 42, 7), true, null);
+        verify(settlementTransactionService).applyAsyncSettlementResult(77L, key("SETTLEMENT", 77, 9), true, null);
+    }
+
+    @Test
+    void poisonPillIsIsolatedByPerRecordFallback() {
+        IllegalStateException poison = new IllegalStateException("bench poison");
+        when(batchApplier.applyBatch(any())).thenThrow(poison);
+        when(refundTransactionService.applyAsyncRefundResult(eq(42L), anyString(), anyBoolean(), any()))
+                .thenAnswer(invocation -> {
+                    if (invocation.getArgument(1).equals(key("REFUND", 42, 8))) {
+                        throw poison;
+                    }
+                    return PointResultApplyOutcome.APPLIED;
+                });
+
+        assertThatThrownBy(() -> consumer.consume(records(credited("REFUND", 42, 7), credited("REFUND", 42, 8),
+                credited("REFUND", 42, 9))))
+                .isInstanceOfSatisfying(PointResultRecordFailedException.class, e -> {
+                    assertThat(e.getIndex()).isEqualTo(1);
+                    assertThat(e.getCause()).isSameAs(poison);
+                });
+
+        verify(refundTransactionService).applyAsyncRefundResult(42L, key("REFUND", 42, 7), true, null);
+        // 원인 건 뒤의 건은 반영하지 않고 다시 전달받는다
+        verify(refundTransactionService, never()).applyAsyncRefundResult(42L, key("REFUND", 42, 9), true, null);
+    }
+
+    @Test
+    void databaseOutageStopsRetryingAndWaitsFromFirstRecordInsteadOfFallback() {
+        IllegalStateException outage = new IllegalStateException("connection refused");
+        when(batchApplier.applyBatch(any())).thenThrow(outage);
+        when(jdbcTemplate.queryForObject("SELECT 1", Integer.class))
+                .thenThrow(new DataAccessResourceFailureException("db down"));
+
+        assertThatThrownBy(() -> consumer.consume(records(credited("REFUND", 42, 7), credited("REFUND", 42, 8))))
+                .isInstanceOfSatisfying(DatabaseUnavailableException.class, e -> {
+                    assertThat(e.getIndex()).isZero();
+                    assertThat(e.getCause()).isSameAs(outage);
+                });
+
+        // 남은 배치 재시도와 건 단위 fallback을 하지 않는다 (장애 중에는 시도마다 커넥션 대기로 길어진다)
+        verify(batchApplier, times(1)).applyBatch(any());
+        verify(refundTransactionService, never()).applyAsyncRefundResult(anyLong(), anyString(), anyBoolean(), any());
+    }
+
+    @Test
+    void databaseOutageDuringPerRecordFallbackWaitsFromThatRecord() {
+        IllegalStateException failure = new IllegalStateException("failure");
+        when(batchApplier.applyBatch(any())).thenThrow(failure);
+        // 배치 시도 3번은 DB가 살아 있고, 건 단위 처리 도중 DB가 죽는다
+        when(jdbcTemplate.queryForObject("SELECT 1", Integer.class))
+                .thenReturn(1, 1, 1)
+                .thenThrow(new DataAccessResourceFailureException("db down"));
+        when(refundTransactionService.applyAsyncRefundResult(eq(42L), anyString(), anyBoolean(), any()))
+                .thenReturn(PointResultApplyOutcome.APPLIED)
+                .thenThrow(failure);
+
+        assertThatThrownBy(() -> consumer.consume(records(credited("REFUND", 42, 7), credited("REFUND", 42, 8))))
+                .isInstanceOfSatisfying(DatabaseUnavailableException.class, e -> assertThat(e.getIndex()).isEqualTo(1));
+    }
+
+    private void stubBatchApplied() {
+        when(batchApplier.applyBatch(any())).thenAnswer(invocation -> {
+            List<Item> items = invocation.getArgument(0);
+            List<PointResultApplyOutcome> outcomes = new ArrayList<>();
+            items.forEach(item -> outcomes.add(PointResultApplyOutcome.APPLIED));
+            return outcomes;
+        });
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Item> appliedItems() {
+        ArgumentCaptor<List<Item>> captor = ArgumentCaptor.forClass(List.class);
+        verify(batchApplier).applyBatch(captor.capture());
+        return captor.getValue();
+    }
+
+    private static String key(String kind, long marketId, long predictionId) {
+        String prefix = "REFUND".equals(kind) ? "MARKET_REFUND" : "MARKET_SETTLEMENT_REWARD";
+        return "%s:market:%d:prediction:%d:member:1001".formatted(prefix, marketId, predictionId);
+    }
+
+    private static String credited(String kind, long marketId, long predictionId) {
+        return event(kind, marketId, predictionId, "POINT_CREDITED",
+                "\"status\": \"PROCESSED\", \"balanceSnapshot\": \"1300.00\"");
+    }
+
+    private static String failed(String kind, long marketId, long predictionId, String errorCode) {
+        return event(kind, marketId, predictionId, "POINT_CREDIT_FAILED", "\"errorCode\": \"" + errorCode + "\"");
+    }
+
+    private static String event(String kind, long marketId, long predictionId, String eventType, String extra) {
+        String requestEventType = "REFUND".equals(kind) ? "MARKET_REFUND_REQUESTED" : "MARKET_SETTLEMENT_PAYOUT_REQUESTED";
+        return """
+                {"eventId": "c3e8f0d2-1a4b-4f6e-8d7c-5b9a0e2f3c11", "eventType": "%s", "schemaVersion": 1,
+                 "occurredAt": "2026-10-01T18:00:00.456+09:00", "producer": "member-point-service",
+                 "data": {"requestEventId": "7f1c2a9e-4b0d-4c5e-9a51-2f7b3c8d1e04", "requestEventType": "%s",
+                          "marketId": %d, "predictionId": %d, "memberId": 1001, "idempotencyKey": "%s",
+                          "amount": "300.00", %s}}
+                """.formatted(eventType, requestEventType, marketId, predictionId, key(kind, marketId, predictionId), extra);
+    }
+
+    private static List<ConsumerRecord<String, String>> records(String... values) {
+        List<ConsumerRecord<String, String>> records = new ArrayList<>();
+        for (int i = 0; i < values.length; i++) {
+            records.add(new ConsumerRecord<>(TOPIC, 0, i, "42", values[i]));
+        }
+        return records;
     }
 }

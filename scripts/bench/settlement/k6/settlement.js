@@ -21,7 +21,7 @@ const PRE = __ENV.PRE || '5s';
 const MEMBER_BASE = 500000;
 const MARKET_ID = 800000 + RUN;
 // cleanup.sh run <n>이 함께 지우도록 run의 예측 ID 대역 끝값을 referenceId로 쓴다
-const REFERENCE_ID = 500000 + RUN * 10000 + 9999;
+const REFERENCE_ID = Number(__ENV.REFERENCE_ID); // run.sh가 ids.sh 예측 대역의 마지막 값을 넘긴다 (승자 예측 ID와 겹치지 않게)
 
 const settleStart = new Gauge('settle_start_ms');
 const settleApi = new Trend('settle_api_ms', true);

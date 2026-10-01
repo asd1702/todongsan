@@ -11,6 +11,7 @@
 # 실험 DB에서만 쓰고, 끝나면 반드시 clear 한다.
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
+. "$(dirname "${BASH_SOURCE[0]}")/ids.sh"
 
 mq() { docker exec -i -e MYSQL_PWD="${MARKET_MYSQL_ROOT_PASSWORD:-market-root-local-password}" market-mysql mysql -uroot -N market "$@" 2>/dev/null; }
 mpq() { docker exec -i -e MYSQL_PWD="${MEMBERPOINT_MYSQL_ROOT_PASSWORD:-memberpoint-root-local-password}" member-point-mysql mysql -uroot -N memberpoint "$@" 2>/dev/null; }
@@ -18,7 +19,7 @@ mpq() { docker exec -i -e MYSQL_PWD="${MEMBERPOINT_MYSQL_ROOT_PASSWORD:-memberpo
 case "${1:-}" in
   poison)
     run="${2:?run}"; i="${3:?i}"
-    key="MARKET_SETTLEMENT_REWARD:market:$((800000 + run)):prediction:$((500000 + run * 10000 + i)):member:$((500000 + i))"
+    key="MARKET_SETTLEMENT_REWARD:market:$((MARKET_BASE + run)):prediction:$(($(pred_lo "$run") + i)):member:$((MEMBER_BASE + i))"
     mq <<SQL
 DROP TRIGGER IF EXISTS bench_poison;
 DELIMITER //
@@ -37,7 +38,7 @@ SQL
     # Debezium은 별도 계정이라 CDC는 영향이 없다.
     run="${2:?run}"; sec="${3:?sec}"
     until [ "$(mq -e "SELECT COUNT(*) > 0 FROM market_settlement_detail d JOIN market_settlement s ON s.id = d.settlement_id
-                     WHERE s.market_id = $((800000 + run)) AND d.status = 'SUCCESS';")" = "1" ]; do sleep 0.2; done
+                     WHERE s.market_id = $((MARKET_BASE + run)) AND d.status = 'SUCCESS';")" = "1" ]; do sleep 0.2; done
     mq -e "ALTER USER 'market_user'@'%' ACCOUNT LOCK;"
     echo "outage start $(date +%T) (${sec}s)"
     end=$(($(date +%s) + sec))
@@ -51,7 +52,7 @@ SQL
   outage-mp)
     # Member-Point 쪽 같은 장애. run의 지급 이력이 쌓이기 시작하면 memberpoint_user를 잠근다.
     run="${2:?run}"; sec="${3:?sec}"
-    pid_lo=$((500000 + run * 10000)); pid_hi=$((pid_lo + 9999))
+    pid_lo=$(pred_lo "$run"); pid_hi=$(pred_hi "$run")
     until [ "$(mpq -e "SELECT COUNT(*) > 0 FROM point_history WHERE type = 'SETTLE_MARKET'
                       AND reference_type = 'MARKET_PREDICTION' AND reference_id BETWEEN $pid_lo AND $pid_hi;")" = "1" ]; do sleep 0.2; done
     mpq -e "ALTER USER 'memberpoint_user'@'%' ACCOUNT LOCK;"

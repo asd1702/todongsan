@@ -26,8 +26,9 @@ MP_PW="${MEMBERPOINT_MYSQL_ROOT_PASSWORD:-memberpoint-root-local-password}"
 [ -f "$STATE" ] || { echo "앱 상태 없음: apps.sh start 먼저" >&2; exit 1; }
 # shellcheck disable=SC1090
 . "$STATE"
-market_id=$((800000 + run))
-pid_lo=$((500000 + run * 10000)); pid_hi=$((pid_lo + 9999))
+. "$(dirname "${BASH_SOURCE[0]}")/ids.sh"
+market_id=$((MARKET_BASE + run))
+pid_lo=$(pred_lo "$run"); pid_hi=$(pred_hi "$run")
 RUN_DIR="$OUT/runs/$(date +%Y%m%d-%H%M%S)-run$run-$MODE-$KEY-n$n"
 mkdir -p "$RUN_DIR"
 
@@ -71,7 +72,7 @@ market_poller=$!
 docker run --rm --name "bench-k6-run$run" \
   -v "$(cygpath -m "$DIR/k6"):/scripts:ro" -v "$(cygpath -m "$RUN_DIR"):/out" \
   grafana/k6:latest run --quiet --out json=/out/k6.json \
-  -e RUN="$run" -e N="$n" -e RATE="$rate" -e DURATION="$DURATION" -e PRE="$PRE" \
+  -e RUN="$run" -e N="$n" -e RATE="$rate" -e DURATION="$DURATION" -e PRE="$PRE" -e REFERENCE_ID="$pid_hi" \
   /scripts/settlement.js > "$RUN_DIR/k6.log" 2>&1 || echo "k6 exit $? (log: $RUN_DIR/k6.log)"
 
 wait "$mp_poller" "$market_poller" || true

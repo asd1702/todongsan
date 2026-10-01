@@ -9,10 +9,9 @@
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
 
-MEMBER_LO=500001
-MEMBER_HI=503000
-MARKET_BASE=800000
-PREDICTION_BASE=500000
+. "$(dirname "${BASH_SOURCE[0]}")/ids.sh"
+MEMBER_LO=$((MEMBER_BASE + 1))
+MEMBER_HI=$((MEMBER_BASE + MEMBER_POOL_MAX))
 
 mq() { docker exec -i market-mysql mysql -uroot -p"${MARKET_MYSQL_ROOT_PASSWORD:-market-root-local-password}" market -N "$@" 2>/dev/null; }
 pq() { docker exec -i member-point-mysql mysql -uroot -p"${MEMBERPOINT_MYSQL_ROOT_PASSWORD:-memberpoint-root-local-password}" memberpoint -N "$@" 2>/dev/null; }
@@ -41,8 +40,8 @@ SQL
 }
 
 report() {
-  echo "market rows (800001~800040): $(mq -e "SELECT COUNT(*) FROM market WHERE id BETWEEN $((MARKET_BASE + 1)) AND $((MARKET_BASE + 40));")," \
-       "predictions: $(mq -e "SELECT COUNT(*) FROM market_prediction WHERE market_id BETWEEN $((MARKET_BASE + 1)) AND $((MARKET_BASE + 40));")," \
+  echo "market rows ($((MARKET_BASE + 1))~$((MARKET_BASE + RUN_MAX))): $(mq -e "SELECT COUNT(*) FROM market WHERE id BETWEEN $((MARKET_BASE + 1)) AND $((MARKET_BASE + RUN_MAX));")," \
+       "predictions: $(mq -e "SELECT COUNT(*) FROM market_prediction WHERE market_id BETWEEN $((MARKET_BASE + 1)) AND $((MARKET_BASE + RUN_MAX));")," \
        "bench members: $(pq -e "SELECT COUNT(*) FROM member WHERE id BETWEEN $MEMBER_LO AND $MEMBER_HI;")," \
        "bench history: $(pq -e "SELECT COUNT(*) FROM point_history WHERE member_id BETWEEN $MEMBER_LO AND $MEMBER_HI;")"
 }
@@ -52,14 +51,14 @@ case "${1:-}" in
     run="${2:?run 번호 필요}"
     delete_markets $((MARKET_BASE + run)) $((MARKET_BASE + run))
     pq -e "DELETE FROM point_history WHERE reference_type = 'MARKET_PREDICTION'
-             AND reference_id BETWEEN $((PREDICTION_BASE + run * 10000)) AND $((PREDICTION_BASE + run * 10000 + 9999));"
+             AND reference_id BETWEEN $(pred_lo "$run") AND $(pred_hi "$run");"
     ;;
   runs)
-    delete_markets $((MARKET_BASE + 1)) $((MARKET_BASE + 40))
+    delete_markets $((MARKET_BASE + 1)) $((MARKET_BASE + RUN_MAX))
     pq -e "DELETE FROM point_history WHERE member_id BETWEEN $MEMBER_LO AND $MEMBER_HI;"
     ;;
   all)
-    delete_markets $((MARKET_BASE + 1)) $((MARKET_BASE + 40))
+    delete_markets $((MARKET_BASE + 1)) $((MARKET_BASE + RUN_MAX))
     pq <<SQL
 DELETE FROM point_history WHERE member_id BETWEEN $MEMBER_LO AND $MEMBER_HI;
 DELETE FROM oauth_token WHERE member_id BETWEEN $MEMBER_LO AND $MEMBER_HI;

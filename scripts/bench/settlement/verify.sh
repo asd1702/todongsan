@@ -12,9 +12,10 @@ set -uo pipefail
 export MSYS_NO_PATHCONV=1
 
 run="${1:?run 번호 필요}"
-market_id=$((800000 + run))
-pid_lo=$((500000 + run * 10000))
-pid_hi=$((pid_lo + 9999))
+. "$(dirname "${BASH_SOURCE[0]}")/ids.sh"
+market_id=$((MARKET_BASE + run))
+pid_lo=$(pred_lo "$run")
+pid_hi=$(pred_hi "$run")
 
 mq() { docker exec -i market-mysql mysql -uroot -p"${MARKET_MYSQL_ROOT_PASSWORD:-market-root-local-password}" market -N "$@" 2>/dev/null; }
 pq() { docker exec -i member-point-mysql mysql -uroot -p"${MEMBERPOINT_MYSQL_ROOT_PASSWORD:-memberpoint-root-local-password}" memberpoint -N "$@" 2>/dev/null; }

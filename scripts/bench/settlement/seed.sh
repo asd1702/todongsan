@@ -1,24 +1,15 @@
 #!/usr/bin/env bash
 # 정산 sync/async 비교 실험 데이터 생성 (docs/architecture/ASYNC_POINT_FLOW.md §15.2)
 #
-#   ./scripts/bench/settlement/seed.sh members [M=3000]          # MP 실험 회원 풀 (1회, 재실행 안전)
+#   ./scripts/bench/settlement/seed.sh members [M=15000]         # MP 실험 회원 풀 (1회, 재실행 안전)
 #   ./scripts/bench/settlement/seed.sh market <run> <N> [ratio]  # run용 CLOSED 정산 마켓 (승자 N, 패자 N×ratio)
 #
-# ID 대역은 현재 AUTO_INCREMENT보다 작은 빈 대역이다 (큰 ID를 직접 넣으면 AUTO_INCREMENT가 밀린다).
-#   MP 회원     500,001 ~ 500,000+M
-#   마켓        800,000 + run
-#   옵션        810,000 + run×2 (+0 결과 A, +1 패배 B)
-#   예측        500,000 + run×10,000 + i   (run 1~40, 승자+패자 ≤ 9,999)
-# 승자 i = 1..N → 회원 500,000+i, 패자 i = N+1..N+L → 회원 500,000+i
+# ID 대역: ids.sh
 # 예측 금액 = 100 + (i % 10) × 10, 계약 수량 = 금액 ÷ 0.5
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
 
-MEMBER_BASE=500000
-MEMBER_POOL_MAX=3000
-MARKET_BASE=800000
-OPTION_BASE=810000
-PREDICTION_BASE=500000
+. "$(dirname "${BASH_SOURCE[0]}")/ids.sh"
 INITIAL_BALANCE="1000000.00"
 FEE_RATE="5.00"
 
@@ -31,7 +22,7 @@ seed_members() {
     echo "M은 1~$MEMBER_POOL_MAX" >&2; exit 1
   fi
   pq <<SQL
-SET SESSION cte_max_recursion_depth = 10000;
+SET SESSION cte_max_recursion_depth = 20000;
 INSERT IGNORE INTO member (id, nickname, oauth_provider, oauth_id, point_balance)
 WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < $m)
 SELECT $MEMBER_BASE + n, CONCAT('bench-', n), 'BENCH', CONCAT('bench-', n), $INITIAL_BALANCE FROM s;
@@ -47,10 +38,10 @@ seed_market() {
   market_id=$((MARKET_BASE + run))
   option_a=$((OPTION_BASE + run * 2))
   option_b=$((option_a + 1))
-  pid_base=$((PREDICTION_BASE + run * 10000))
+  pid_base=$(pred_lo "$run")
 
-  if [ "$run" -lt 1 ] || [ "$run" -gt 40 ]; then echo "run은 1~40" >&2; exit 1; fi
-  if [ "$total" -gt 9999 ]; then echo "승자+패자는 9,999 이하" >&2; exit 1; fi
+  if [ "$run" -lt 1 ] || [ "$run" -gt "$RUN_MAX" ]; then echo "run은 1~$RUN_MAX" >&2; exit 1; fi
+  if [ "$total" -ge "$PREDICTION_STRIDE" ]; then echo "승자+패자는 $((PREDICTION_STRIDE - 1)) 이하" >&2; exit 1; fi
   pool=$(pq -e "SELECT COUNT(*) FROM member WHERE id BETWEEN $((MEMBER_BASE + 1)) AND $((MEMBER_BASE + total));")
   if [ "$pool" -lt "$total" ]; then echo "회원 풀 부족: 필요 $total, 존재 $pool (seed.sh members 먼저)" >&2; exit 1; fi
   if [ "$(mq -e "SELECT COUNT(*) FROM market WHERE id = $market_id;")" -ne 0 ]; then
@@ -61,7 +52,7 @@ seed_market() {
   pq -e "UPDATE member SET point_balance = $INITIAL_BALANCE WHERE id BETWEEN $((MEMBER_BASE + 1)) AND $((MEMBER_BASE + MEMBER_POOL_MAX));"
 
   mq <<SQL
-SET SESSION cte_max_recursion_depth = 10000;
+SET SESSION cte_max_recursion_depth = 20000;
 INSERT INTO market (id, title, category, answer_type, judge_data_source, judge_criteria, judge_date,
                     status, close_at, result_option_id, total_pool, fee_rate, fee_amount, settlement_pool,
                     initial_virtual_liquidity, created_by, created_at, updated_at)

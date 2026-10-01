@@ -752,5 +752,17 @@ MP:     해당 예측들의 SETTLE_MARKET 이력 = N건 (중복 없음), Σ amou
 | # | 발견 | 반영 |
 |---|---|---|
 | F6 | 두 서비스 모두 `spring.kafka.listener.concurrency`가 없어 **consumer thread 1개가 파티션 3개를 순차 처리**했다. D4(요청 key `member_id`)의 "MP 병렬 처리" 전제가 실제로 성립하지 않았고, key 전략 실험도 차이가 날 수 없었다 (2~4단계 구현의 공백) | 동시성 3 기본값 + `KAFKA_LISTENER_CONCURRENCY`로 변경 가능 (D9, §3.3). 기동 로그에서 thread 3개가 파티션 하나씩 배정되는 것과 정산 스모크 테스트 확인 |
-| F7 | 실험 ID 대역 원안(예측 8,000,000~, 회원 7,000,001~)이 현재 AUTO_INCREMENT보다 커서 개발 DB의 AUTO_INCREMENT를 영구히 밀어낼 수 있었다 | 현재 AUTO_INCREMENT보다 작은 빈 대역으로 변경 (위 표) |
+| F7 | 실험 ID 대역 원안(예측 8,000,000~, 회원 7,000,001~)이 현재 AUTO_INCREMENT보다 커서 개발 DB의 AUTO_INCREMENT를 밀어낼 수 있었다 | 현재 AUTO_INCREMENT보다 작은 빈 대역으로 변경 (위 표). 전체 정리(`cleanup.sh all`)는 데이터 삭제 후 `ALTER TABLE ... AUTO_INCREMENT = 1`로 현재 최대값+1을 복구한다 |
 | F8 | 지급 이력·detail 시각 컬럼이 초 단위라 1초 미만 완료 시간을 DB 시각으로 잴 수 없다. sync는 Feign timeout 시 Market 완료가 재시도 스케줄러(3분)에 걸린다 | 스크립트 폴링(ms) 측정, 완료 시간을 (a) MP 반영 / (b) Market 완료로 분리 |
+| F9 | AUTO_INCREMENT 검증 중 `information_schema.TABLES.AUTO_INCREMENT`가 실제보다 작게 보였다. MySQL 8은 테이블 통계를 기본 24시간 캐시한다 (`information_schema_stats_expiry`) | 검증 쿼리에서 `SET SESSION information_schema_stats_expiry = 0` 후 조회 |
+
+#### 실험 도구 검증 (2026-10-01, N=10)
+
+| 도구 | 확인 |
+|---|---|
+| `seed.sh members` | 3,000명 생성 약 1.3초, 재실행 시 중복 없음 |
+| `seed.sh market` | 승자 10 / 패자 5, 금액 100~190, ID 대역 준수, 같은 run 재생성 거부 |
+| `verify.sh` | 정산 전 FAIL, 정산 후 10개 항목 PASS (기대 지급액 SQL 재계산, 소각 0.05 포함). 지급액 비교는 "일치 건수 = 승자 수"로 검사해 detail이 없을 때 통과하지 않게 함 |
+| async 정산 (MP 클라이언트 http) | run 1 PASS |
+| sync 정산 (Feign → 실제 MP) | run 2 PASS, outbox 기록 없음 |
+| `cleanup.sh run / runs / all` | 단계별 삭제 범위 정확, 정리 후 재생성 가능, **개발 데이터 건수·AUTO_INCREMENT가 시작 전과 동일** |

@@ -1,6 +1,6 @@
 # Market ↔ Member-Point 비동기 포인트 흐름 설계
 
-> 상태: **구현 중** (1~3단계 완료: 환불 요청·결과 방향과 R5. 4단계 정산 적용 예정)
+> 상태: **구현 중** (1~4단계 완료: 환불·정산의 요청·결과 방향과 R5. 5단계 정리·실험, 6단계 펜싱 예정)
 > 범위: Market Service ↔ Member-Point Service. Battle / Insight 연계는 이 문서의 범위가 아니다.
 > 상위 원칙: 루트 `AGENTS.md` 섹션 5 "비동기 이벤트 원칙 (DB = SSOT, CDC)"
 
@@ -112,7 +112,7 @@ outbox row의 키는 발행 측이 정하므로 토픽마다 키를 다르게 �
 | 관리자 API 응답 | 대부분 완료 상태, timeout 시 `IN_PROGRESS` | 기본적으로 `SETTLEMENT_IN_PROGRESS` / `IN_PROGRESS` |
 | detail `UNKNOWN` | batch timeout 시 기록 | 발생하지 않음. 전송 중은 `PENDING` |
 | 재시도 | `MarketSettlementRetryScheduler`, `MarketRefundRetryScheduler` (3분) | Kafka consumer 재시도 → DLQ |
-| 정체 감지 | 관리자 문제 마켓 API (`PENDING` 3분 초과) | 동일 기능 재사용 (§6.3) |
+| 정체 감지 | 관리자 문제 마켓 API (환불: `PENDING` 3분 초과 포함, 정산: 미포함) | 환불·정산 모두 `PENDING` 3분 초과 포함 (§6.3, 정산은 4단계 S3) |
 
 API 응답 **구조**는 바뀌지 않는다. `IN_PROGRESS` 계열 상태는 현재 명세(`MARKET_API_SPEC.md`)에 이미 정의되어 있다.
 
@@ -157,7 +157,7 @@ item 멱등성 키는 기존 형식을 그대로 쓴다.
 | R6 | 커넥터 장애 | outbox에 남아 있어 유실 없음. Connect REST로 상태 확인 후 재시작 (`INFRA_GUIDE.md`) | 5단계 (절차 문서화) |
 | R7 | outbox 보존 | 7일 보존 후 삭제 (Market, MP 각자 스케줄러). Debezium은 INSERT만 발행하므로 삭제는 발행에 영향 없음 | 5단계 |
 
-R4(정체 감지)는 §6.3을 따른다. R5는 2단계 시점의 공백이다: async 모드에서도 관리자 수동 재시도가 Feign 동기 재전송을 한다 (멱등이므로 중복 지급은 없지만 경로가 섞인다).
+R4(정체 감지)는 §6.3을 따른다. R5는 2단계 시점의 공백이었다: async 모드에서도 관리자 수동 재시도가 Feign 동기 재전송을 했다 (3단계 환불, 4단계 정산에서 해소).
 
 ### 6.2 자동 재시도 스케줄러와의 관계
 
@@ -173,7 +173,7 @@ async 모드에서 `MarketRefundRetryScheduler`(및 4단계 이후 `MarketSettle
 |---|---|---|---|
 | 문제 발생 | DLT 유입 | DLT 토픽을 구독해 경고 로그 (즉시, 이벤트 기반) | 5단계 |
 | 파이프라인 정체 | 커넥터 중단, consumer 멈춤 | Connect REST 상태, `kafka-consumer-groups.sh --describe` lag 확인 절차 | 5단계 (절차 문서화) |
-| 비즈니스 정체 (R4) | detail `PENDING` 3분 초과 | 기존 관리자 문제 마켓 API (`adminProblemUnion`의 REFUND / SETTLEMENT) 재사용 | 기존 기능 |
+| 비즈니스 정체 (R4) | detail `PENDING` 3분 초과 | 관리자 문제 마켓 API (`adminProblemUnion`). **환불은 기존 기능 그대로, 정산은 4단계에서 보강** (기존 정산 쿼리는 `PENDING`을 제외하고 `pending_stale_count`가 0 고정이었다, §14 S3) | 환불: 기존 기능 / 정산: 4단계 |
 
 비즈니스 정체는 관리자가 화면을 열어야 보인다. 주기적 알림이 필요해지면 같은 조건을 1분 주기로 조회해 로그를 남기는 스케줄러를 추가한다 (현재 범위 아님).
 
@@ -356,7 +356,7 @@ CREATE TABLE market_outbox_event (          -- member-point: point_outbox_event
 | 1 | 설계 확정 (이 문서 + 이벤트 스키마 + ERD) — **완료** | 문서 리뷰 |
 | 2 | **환불 요청 방향** — **완료**: Market outbox (Flyway V2), 환불 준비 TX에서 outbox 기록, 커넥터 등록, MP consumer. async 모드에서 환불 재시도 스케줄러는 skip | 무효 처리 → MP `point_history` 생성, 같은 메시지 재전달 시 `ALREADY_PROCESSED` |
 | 3 | **환불 결과 방향** — **완료**: MP outbox (Flyway V2, JdbcTemplate), 결과 이벤트, Market consumer 완료 판정 (R2), async 수동 재시도 outbox 재기록 (R5) | 무효 → `VOIDED` 자동 완료, MP 중단·재기동 후에도 유실 없음, 수동 재시도가 Feign을 호출하지 않음 |
-| 4 | **정산 적용**: 2~3 구조를 정산에 적용 | 정산 → `SETTLED`, 기존 정산 테스트 통과 |
+| 4 | **정산 적용** — **완료** (§14): 2~3 구조를 정산에 적용, 패자 처리 시점(S1), 결과 반영 가드(S2), 정체 PENDING 감지·재시도(S3, 두 모드) | 정산 → `SETTLED` 자동 완료, 패자는 준비 직후 `SETTLED`, reputation task 1회 생성, 금액이 sync와 동일, 기존 정산 테스트 통과 |
 | 5 | 정리: DLT 재발행 스크립트 (R3), DLT 경고·lag·커넥터 점검 절차 (R6, §6.3), outbox 삭제 (R7), 실험 수행 및 결과 기록 | 전체 테스트, 실험 결과 문서화 |
 | 6 | **spend 펜싱** (§12.6): MP `POST /internal/api/v1/points/spend/fence`, Market 대사 `NOT_FOUND` 처리 변경 | 펜싱 후 늦게 도착한 spend가 차감하지 못함, 펜싱과 spend 동시 실행 시 결과가 하나로 결정됨 |
 
@@ -518,7 +518,7 @@ Market의 prediction 상태와 이벤트 스키마는 바뀌지 않는다. "NOT_
 | 1 | Market 결과 consumer on/off | 전송 방식 플래그와 별도: `market.kafka.point-results.enabled` (`MARKET_POINT_RESULTS_CONSUMER_ENABLED`, 기본 false). sync로 되돌려도 이미 나간 요청의 결과는 반영해야 한다 |
 | 2 | `ALREADY_PROCESSED` 결과 | `POINT_CREDITED`(status `ALREADY_PROCESSED`)를 다시 발행한다. R5 재전송 건을 Market이 SUCCESS로 마감할 수 있다 |
 | 3 | R5 직후 이전 FAILED 결과 재전달 | 허용. 일시적으로 FAILED로 돌아가도 새 요청의 SUCCESS가 오면 SUCCESS로 끝난다 (SUCCESS는 종결 상태) |
-| 4 | 범위 | 3단계는 환불만 구현. 정산 결과(`requestEventType = MARKET_SETTLEMENT_PAYOUT_REQUESTED`)는 4단계 전까지 처리 불가로 DLT |
+| 4 | 범위 | 3단계는 환불만 구현. 정산 결과(`requestEventType = MARKET_SETTLEMENT_PAYOUT_REQUESTED`)는 4단계 전까지 처리 불가로 DLT (4단계 §14에서 정산 반영 추가) |
 
 ### 13.3 결과 반영 규칙 (Market)
 
@@ -550,3 +550,67 @@ MP 요청 해시는 `memberId|type|amount|referenceType|referenceId`이고 reaso
 | F1 | H2 `JSON` 컬럼에 문자열을 바인딩하면 JSON 문자열 리터럴(`"{\"a\":1}"`)로 저장된다 (H2 2.3.232로 실험). MP 테스트는 엔티티 기준 `create-drop` | MP outbox는 JPA 엔티티 대신 `JdbcTemplate`으로 기록한다. 테스트 스키마는 `@Sql`(CLOB). JPA 트랜잭션과 같은 트랜잭션으로 묶이는지 롤백 테스트로 확인한다 |
 | F2 | MP consumer가 `data` null만 검사. `amount` 누락 시 `RequestHashUtil`에서 NPE → 4회 재시도 후 DLT, `marketId` 누락 시 결과 outbox key 불가, 결과 스키마 필수 필드 위반 | 요청 스키마 필수 필드를 검사하고 누락 시 즉시 DLT |
 | F3 | `prepareRefund` / `prepareRefundRetry`의 락 순서는 market → detail → market_void | 결과 반영도 market row를 먼저 잠근다 (현재 경우의 수로 데드락은 없지만 순서를 통일) |
+
+---
+
+## 14. 4단계 상세 설계 — 정산 적용 (확정)
+
+환불(§13)과 같은 파이프라인·결과 반영 구조를 정산에 적용한다. 아래는 환불과 **다른 점**만 정리한다.
+
+### 14.1 그대로 재사용하는 것
+
+| 항목 | 근거 |
+|---|---|
+| 락 순서 | `prepareSettlement`: `startSettlement`(market UPDATE) → `lockMarketById` → detail. 결과 반영도 market → detail 순서 |
+| 완료 처리 멱등성 | `completeMarketSettlement`(`status='IN_PROGRESS'`), `completeMarket`(`status='SETTLEMENT_IN_PROGRESS'`), reputation task(`INSERT IGNORE` + UNIQUE(prediction_id)) |
+| 승자 prediction 갱신 | `settlePrediction`(`status='CONFIRMED'`일 때만) |
+| 금액 불변식 | 지급액·수수료·소각액은 `prepareSettlement`에서 1회 계산. 재시도는 detail 금액 그대로 사용 |
+| 승자 0명 | prepare에서 MP 호출 없이 즉시 완료 (변경 없음) |
+| 파이프라인 | `market.point-requests` / `memberpoint.point-results`, MP consumer(`SETTLE_MARKET` 매핑), DLT, R5 패턴 |
+
+### 14.2 환불과 다른 점 (확정)
+
+| # | 문제 | 결정 |
+|---|---|---|
+| S1 | sync에서 패자 처리(`settleLoserPredictions`, 패자 → `SETTLED`, 0P)는 MP 호출 **후** 결과 반영 단계에서 실행된다. async에서는 결과가 와야 실행되는데, 패자 처리는 MP와 무관하다 | **async 모드에서는 정산 준비 트랜잭션에서 패자를 처리**한다. sync 경로는 그대로 둔다 |
+| S2 | 결과 반영 가드가 `PENDING`을 포함하지 않는다: `updateSettlementDetailStatus`는 `PENDING`만, `updateRetrySettlementDetailStatus`는 `FAILED`/`UNKNOWN`만 허용 | `updateRetrySettlementDetailStatus` 가드를 `PENDING`/`FAILED`/`UNKNOWN`으로 넓혀 환불(`updateRetryRefundDetailStatus`)과 맞추고, async 결과 반영도 이 SQL을 쓴다. SUCCESS는 종결 |
+| S3 | 정산은 정체된 `PENDING`을 **감지도 재시도도 하지 않는다**: `adminProblemUnion` SETTLEMENT는 `0 AS pending_stale_count` + `status IN ('FAILED','UNKNOWN')`, `selectRetryableSettlementDetails`·`countRetryableSettlementDetails`·`selectMarketIdsForSettlementRetry`도 `PENDING` 제외. async에서 커넥터 중단 등으로 정체되면 관리자 화면에도 안 보이고 R5로도 복구할 수 없다. **sync에도 있는 공백이다** (정산 준비 커밋 후 Feign 호출 전 서버 종료 → 영구 `PENDING`) | **두 모드 모두** 환불과 같은 기준(`FAILED`, `UNKNOWN`, 3분 초과 `PENDING`)으로 감지·재시도한다. 관리자 응답의 `pendingStaleCount` 필드는 이미 있으므로 응답 구조는 바뀌지 않는다. 문서: `MARKET_API_SPEC.md`(정산 재시도·자동 재시도 대상), `MARKET_FAILURE_SCENARIO.md`(정산 재시도 처리 흐름) |
+
+### 14.3 흐름
+
+```text
+[Market TX] prepareSettlement (async)
+  market_settlement + detail PENDING × 승자 수                 (기존)
+  market_outbox_event × 승자 수  MARKET_SETTLEMENT_PAYOUT_REQUESTED, amount = settledAmount
+  settleLoserPredictions → 패자 SETTLED (0P)                   (S1)
+      │ market.point-requests → MP SETTLE_MARKET 적립 → memberpoint.point-results
+      ▼
+[Market TX] applyAsyncSettlementResult
+  lock market → detail(idempotencyKey, FOR UPDATE)
+  → POINT_CREDITED: detail SUCCESS + 승자 prediction SETTLED(settledAmount)
+  → POINT_CREDIT_FAILED: detail FAILED (prediction CONFIRMED 유지)
+  → non-SUCCESS 0건이면 completeMarketSettlement + completeMarket + reputation task 생성
+     아니면 touchMarketSettlement
+```
+
+결과 consumer는 `requestEventType`으로 환불/정산 반영을 고른다.
+
+### 14.4 R5 · 스케줄러
+
+| 항목 | 처리 |
+|---|---|
+| 관리자 수동 재시도 (`POST /settlements/retry`, async) | 재시도 대상 detail(S3 기준)을 `PENDING`으로 되돌리고 같은 item 멱등성 키 + 새 eventId로 outbox 재기록. 응답 `SETTLEMENT_IN_PROGRESS` |
+| `MarketSettlementRetryScheduler` | async 모드에서 skip |
+
+### 14.5 검증 항목 (정산 고유)
+
+- 승자·패자가 섞인 마켓: 패자는 준비 직후 `SETTLED`(0P), 승자는 결과 도착 시 `SETTLED`
+- 완료 시 reputation task가 전체 prediction 수만큼 **1회** 생성 (결과 재전달에도 중복 없음)
+- `burned_point_amount`와 각 지급액이 sync 정산과 같은 계산 결과
+- S3: sync 모드에서도 3분 초과 `PENDING` detail이 재시도·관리자 문제 마켓 조회 대상이 됨
+
+### 14.6 구현 중 반영한 사항
+
+| # | 발견 | 반영 |
+|---|---|---|
+| F4 | S3로 sync 중단 건(정산 준비 커밋 후 Member-Point 호출 전 종료)을 복구할 수 있게 되자, 이 경우 **패자가 `CONFIRMED`로 남는** 문제가 드러났다. sync의 패자 처리는 결과 반영 단계(`applySettlementResult`)에 있어 실행되지 않았고, reputation task는 `status = 'SETTLED'` prediction만 대상이라 패자 task도 생성되지 않는다 (S3 이전에는 복구 자체가 불가능해 드러나지 않았다) | `prepareSettlementRetry`에서도 `settleLoserPredictions`를 실행한다. `CONFIRMED` 패자만 갱신하므로 정상 흐름에서는 변화가 없다 |

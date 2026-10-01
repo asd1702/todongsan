@@ -1254,7 +1254,8 @@ Header Idempotency-Key는 새로운 batch 요청 추적용 키를 사용할 수 
 
 ```text
 1. Market과 진행 중 settlement를 조회한다.
-2. FAILED 또는 UNKNOWN detail만 재시도 대상으로 조회한다.
+2. FAILED, UNKNOWN 또는 3분 이상 PENDING인 detail만 재시도 대상으로 조회한다 (환불 재시도와 같은 기준).
+   정산 준비 커밋 후 Member-Point 호출 전에 서버가 종료되어 PENDING으로 남은 detail도 복구 대상이 된다.
 3. DB 트랜잭션을 종료한 뒤 Member-Point 정산 batch API를 호출한다.
 4. Header Idempotency-Key는 retry UUID 기반 새 값을 사용한다.
 5. items[].idempotencyKey는 기존 detail.idempotency_key를 그대로 사용한다.

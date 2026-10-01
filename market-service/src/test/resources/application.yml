@@ -33,3 +33,5 @@ market:
       enabled: false
     reputation-update:
       enabled: false
+    outbox-cleanup:
+      enabled: false

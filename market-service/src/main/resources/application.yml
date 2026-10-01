@@ -64,6 +64,12 @@ market:
       enabled: true
       fixed-delay-ms: 180000
       limit: 50
+    outbox-cleanup:
+      enabled: ${MARKET_OUTBOX_CLEANUP_SCHEDULER_ENABLED:true}
+      retention-days: 7
+      batch-size: 1000
+      max-batches: 10
+      fixed-delay-ms: 3600000
     reputation-update:
       enabled: ${MARKET_REPUTATION_UPDATE_SCHEDULER_ENABLED:true}
       fixed-delay-ms: ${MARKET_REPUTATION_UPDATE_SCHEDULER_FIXED_DELAY_MS:180000}

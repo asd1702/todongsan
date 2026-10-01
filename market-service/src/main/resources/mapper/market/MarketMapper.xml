@@ -1618,6 +1618,12 @@
         </foreach>
     </insert>
 
+    <delete id="deleteMarketOutboxEventsBefore">
+        DELETE FROM market_outbox_event
+        WHERE created_at &lt; #{threshold}
+        LIMIT #{limit}
+    </delete>
+
     <select id="selectRefundDetailByIdempotencyKeyForUpdate" resultType="com.todongsan.marketservice.market.entity.MarketRefundDetail">
         SELECT *
         FROM market_refund_detail

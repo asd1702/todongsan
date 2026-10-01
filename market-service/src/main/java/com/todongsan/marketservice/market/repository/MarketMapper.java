@@ -439,6 +439,11 @@ public interface MarketMapper {
 
     int insertMarketOutboxEvents(@Param("events") List<MarketOutboxEvent> events);
 
+    int deleteMarketOutboxEventsBefore(
+            @Param("threshold") LocalDateTime threshold,
+            @Param("limit") int limit
+    );
+
     MarketRefundDetail selectRefundDetailByIdempotencyKeyForUpdate(@Param("idempotencyKey") String idempotencyKey);
 
     MarketSettlementDetail selectSettlementDetailByIdempotencyKeyForUpdate(@Param("idempotencyKey") String idempotencyKey);

@@ -1,6 +1,6 @@
 # Market ↔ Member-Point 비동기 포인트 흐름 설계
 
-> 상태: **구현 중** (1~4단계 완료: 환불·정산의 요청·결과 방향과 R5. 5단계 정리·실험, 6단계 펜싱 예정)
+> 상태: **구현 중** (1~4단계 완료, 5단계 A 운영 정리 완료. 5단계 B 실험, 6단계 펜싱 예정)
 > 범위: Market Service ↔ Member-Point Service. Battle / Insight 연계는 이 문서의 범위가 아니다.
 > 상위 원칙: 루트 `AGENTS.md` 섹션 5 "비동기 이벤트 원칙 (DB = SSOT, CDC)"
 
@@ -152,10 +152,10 @@ item 멱등성 키는 기존 형식을 그대로 쓴다.
 |---|---|---|---|
 | R1 | MP 요청 consumer | 4회 지수 backoff (1s→2s→4s→8s) 후 `market.point-requests-dlt`. `NonRetryableEventException`은 즉시 DLT | 구현 완료 (2단계) |
 | R2 | Market 결과 consumer | R1과 동일 정책, `memberpoint.point-results-dlt` | 3단계 |
-| R3 | DLT 처리 | **자동 재처리하지 않는다.** 원인 해결 후 스크립트로 원 토픽에 재발행. 소비 측이 멱등하므로 재발행해도 안전 | 5단계 (재발행 스크립트) |
+| R3 | DLT 처리 | **자동 재처리하지 않는다.** 원인 해결 후 스크립트로 원 토픽에 재발행. 소비 측이 멱등하므로 재발행해도 안전 | 완료 (5단계, `scripts/cdc/replay-dlt.sh`) |
 | R5 | 관리자 수동 재시도 API (`POST /refunds/retry`, `/settlements/retry`) | async 모드에서는 Feign 호출 대신, 대상 detail(`FAILED`, 정체된 `PENDING`)에 대해 **같은 item 멱등성 키 + 새 eventId**로 outbox 이벤트를 다시 기록한다 | 3단계 (환불), 4단계 (정산) |
-| R6 | 커넥터 장애 | outbox에 남아 있어 유실 없음. Connect REST로 상태 확인 후 재시작 (`INFRA_GUIDE.md`) | 5단계 (절차 문서화) |
-| R7 | outbox 보존 | 7일 보존 후 삭제 (Market, MP 각자 스케줄러). Debezium은 INSERT만 발행하므로 삭제는 발행에 영향 없음 | 5단계 |
+| R6 | 커넥터 장애 | outbox에 남아 있어 유실 없음. Connect REST로 상태 확인 후 재시작 (`INFRA_GUIDE.md`) | 완료 (5단계, `scripts/cdc/health.sh`, `INFRA_GUIDE.md`) |
+| R7 | outbox 보존 | 7일 보존 후 삭제 (Market, MP 각자 스케줄러). Debezium은 INSERT만 발행하므로 삭제는 발행에 영향 없음 | 완료 (5단계) |
 
 R4(정체 감지)는 §6.3을 따른다. R5는 2단계 시점의 공백이었다: async 모드에서도 관리자 수동 재시도가 Feign 동기 재전송을 했다 (3단계 환불, 4단계 정산에서 해소).
 
@@ -171,8 +171,8 @@ async 모드에서 `MarketRefundRetryScheduler`(및 4단계 이후 `MarketSettle
 
 | 층 | 감지 대상 | 방법 | 단계 |
 |---|---|---|---|
-| 문제 발생 | DLT 유입 | DLT 토픽을 구독해 경고 로그 (즉시, 이벤트 기반) | 5단계 |
-| 파이프라인 정체 | 커넥터 중단, consumer 멈춤 | Connect REST 상태, `kafka-consumer-groups.sh --describe` lag 확인 절차 | 5단계 (절차 문서화) |
+| 문제 발생 | DLT 유입 | DLT로 발행하는 시점에 ERROR 로그 (§15.1에서 (a) 채택, DLT 구독 consumer는 미도입). 적재 건수는 `health.sh` | 완료 (5단계) |
+| 파이프라인 정체 | 커넥터 중단, consumer 멈춤 | Connect REST 상태, `kafka-consumer-groups.sh --describe` lag 확인 절차 | 완료 (5단계, `health.sh`) |
 | 비즈니스 정체 (R4) | detail `PENDING` 3분 초과 | 관리자 문제 마켓 API (`adminProblemUnion`). **환불은 기존 기능 그대로, 정산은 4단계에서 보강** (기존 정산 쿼리는 `PENDING`을 제외하고 `pending_stale_count`가 0 고정이었다, §14 S3) | 환불: 기존 기능 / 정산: 4단계 |
 
 비즈니스 정체는 관리자가 화면을 열어야 보인다. 주기적 알림이 필요해지면 같은 조건을 1분 주기로 조회해 로그를 남기는 스케줄러를 추가한다 (현재 범위 아님).
@@ -614,3 +614,64 @@ MP 요청 해시는 `memberId|type|amount|referenceType|referenceId`이고 reaso
 | # | 발견 | 반영 |
 |---|---|---|
 | F4 | S3로 sync 중단 건(정산 준비 커밋 후 Member-Point 호출 전 종료)을 복구할 수 있게 되자, 이 경우 **패자가 `CONFIRMED`로 남는** 문제가 드러났다. sync의 패자 처리는 결과 반영 단계(`applySettlementResult`)에 있어 실행되지 않았고, reputation task는 `status = 'SETTLED'` prediction만 대상이라 패자 task도 생성되지 않는다 (S3 이전에는 복구 자체가 불가능해 드러나지 않았다) | `prepareSettlementRetry`에서도 `settleLoserPredictions`를 실행한다. `CONFIRMED` 패자만 갱신하므로 정상 흐름에서는 변화가 없다 |
+
+---
+
+## 15. 5단계 설계 — 운영 정리 + 성능 비교 실험 (확정)
+
+순서: **A(운영 정리) → B(실험)**. 실험 중 DLT·lag 확인이 필요하므로 A를 먼저 한다.
+Feign 동기 경로와 재시도 스케줄러는 실험이 끝날 때까지 유지하고, 결과를 보고 제거 또는 fallback 유지를 결정한다 (D6).
+
+### 15.1 A. 운영 정리
+
+| # | 항목 | 결정 |
+|---|---|---|
+| DLT 감지 | DLT 유입을 어떻게 알 것인가 | **DLT로 발행하는 시점에 ERROR 로그** (recoverer 래핑). 발행 성공·실패를 구분해 남긴다. 적재 건수는 `health.sh`로 조회 |
+| R3 | DLT 재발행 | `scripts/cdc/replay-dlt.sh`: DLT 메시지를 원래 key·value 그대로 원 토픽에 재발행. 전용 consumer group으로 이미 재발행한 메시지는 다시 보내지 않는다 |
+| R6 | 파이프라인 점검 | `scripts/cdc/health.sh`: 커넥터 상태, consumer lag, DLT 적재 건수. 커넥터 재시작 절차는 `INFRA_GUIDE.md` |
+| R7 | outbox 삭제 | Market·MP 각자 스케줄러가 7일 지난 row를 배치(1,000건) 단위로 삭제. 긴 락을 피하기 위해 한 실행에 최대 10배치 |
+
+**DLT 감지 방식 비교 (채택: (a))**
+
+| | (a) 발행 시점 로그 | (b) DLT 구독 consumer |
+|---|---|---|
+| 구현량 | 수 줄 | listener + group + 설정 + 테스트 |
+| 원인 정보 | 예외 객체 그대로 | DLT 헤더 문자열 |
+| 감지 범위 | 해당 서비스가 보낸 것 | DLT에 들어온 모든 것 |
+| 실패 지점 | DLT 발행 실패 시 → 실패 로그를 따로 남겨 보완 | consumer가 죽으면 감지 중단 |
+
+(b)는 DLT를 관리자 화면에서 조회·재처리하는 기능이 필요해지면 도입한다 (DB 저장 + 화면).
+
+**R7 사전 검증 (2026-10-01, 로컬).** outbox에 row를 INSERT 후 DELETE: 토픽에는 INSERT 1건만 발행되고 DELETE는 발행되지 않았으며 커넥터는 `RUNNING`을 유지했다 (`tombstones.on.delete=false`). outbox 삭제는 발행에 영향이 없다.
+
+**A 구현 결과 (2026-10-01).**
+
+| 항목 | 구현 | 검증 |
+|---|---|---|
+| DLT 감지 (a) | `LoggingDeadLetterRecoverer` (Market·MP) | 단위 테스트 + 실측: 재발행한 불량 메시지가 `Sent to DLT ... cause=...NonRetryableEventException: ...`로 기록됨 |
+| R3 | `scripts/cdc/replay-dlt.sh` (`--dry-run`, 전용 group `dlt-replay.<dlt>`) | 실측: 2건 재발행, 두 번째 실행에서 이미 재발행한 건 제외. 재처리 불가 메시지 건너뛰기 절차는 `INFRA_GUIDE.md` |
+| R6 | `scripts/cdc/health.sh` | 실측: DLT 미재발행 있으면 `CHECK` + 종료 코드 1, 정리 후 0 |
+| R7 | `MarketOutboxCleanupScheduler`, `PointOutboxCleanupScheduler` (MP에 `@EnableScheduling` 추가) | 실측: 8일 전 row만 삭제, 1일 전 row 유지, `DELETE ... LIMIT` MySQL 동작 확인 |
+
+| # | 발견 | 반영 |
+|---|---|---|
+| F5 | DLT 성공 로그가 `cause={}`로 찍혔다. SLF4J는 **마지막 인자가 `Throwable`이면 placeholder에 넣지 않고 스택 트레이스로 출력**한다. 단위 테스트는 스택 트레이스에 메시지가 있어 통과했다 | placeholder에는 `String.valueOf(cause)`, 마지막 인자에 `cause`(스택 트레이스). 테스트는 로그 줄 자체(`cause=...`)와 `cause={}` 부재를 검사하도록 강화하고, 수정 전 코드에서 실패하는 것을 확인 |
+
+### 15.2 B. 성능 비교 실험
+
+| 변수 | 값 |
+|---|---|
+| 전송 방식 | `sync` (Feign 배치, MP 클라이언트 http 모드) / `async` (CDC) |
+| 요청 토픽 키 | `member_id` / `market_id` (async) |
+| 승자 수 N | 100 / 1,000 |
+
+| 지표 | 의미 |
+|---|---|
+| 관리자 API 응답 시간 | 요청 스레드 점유 시간 |
+| 정산 요청 → 전원 완료 시간 | end-to-end 지연 (async는 CDC 2회 포함) |
+| MP 락 대기·데드락 | `Innodb_row_lock_waits`, `Innodb_row_lock_time`, `lock_deadlocks` 전후 차이 |
+| **정산 중 사용자 `spend` 지연** | 정산 대상 회원이 다른 마켓에 동시 예측 참여할 때 p50 / p95. sync 배치는 MP에서 N명의 잔액 row를 한 트랜잭션으로 잡는다 |
+| 장애 복구 | 처리 중 MP 중단 → 재기동 시 유실 0 / 중복 0 |
+
+도구: `scripts/bench/settlement/seed.sh`, `run.sh`. 결과: `reports/bench/`, `EXPERIMENT_RESULTS.md` ④.
+해석 한계: 로컬 단일 머신·Docker이므로 절대값보다 상대 비교를 본다. 3라운드 반복으로 안정성을 먼저 확인한다.

@@ -23,3 +23,7 @@ jwt:
 
 kakao:
   api-base-url: http://localhost:9999
+
+member-point:
+  outbox-cleanup:
+    enabled: false

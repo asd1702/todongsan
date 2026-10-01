@@ -30,6 +30,13 @@ member-point:
       # Market outbox + CDC 비동기 포인트 요청 consumer (docs/architecture/ASYNC_POINT_FLOW.md)
       enabled: ${MARKET_POINT_REQUESTS_CONSUMER_ENABLED:false}
       topic: market.point-requests
+  outbox-cleanup:
+    # point_outbox_event 보존 기간 경과 row 삭제 (ASYNC_POINT_FLOW.md §6.1 R7)
+    enabled: ${POINT_OUTBOX_CLEANUP_SCHEDULER_ENABLED:true}
+    retention-days: 7
+    batch-size: 1000
+    max-batches: 10
+    fixed-delay-ms: 3600000
 
 server:
   port: 8080

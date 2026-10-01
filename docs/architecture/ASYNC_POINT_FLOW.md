@@ -112,7 +112,7 @@ outbox row의 키는 발행 측이 정하므로 토픽마다 키를 다르게 �
 | 관리자 API 응답 | 대부분 완료 상태, timeout 시 `IN_PROGRESS` | 기본적으로 `SETTLEMENT_IN_PROGRESS` / `IN_PROGRESS` |
 | detail `UNKNOWN` | batch timeout 시 기록 | 발생하지 않음. 전송 중은 `PENDING` |
 | 재시도 | `MarketSettlementRetryScheduler`, `MarketRefundRetryScheduler` (3분) | Kafka consumer 재시도 → DLQ |
-| 정체 감지 | 없음 | `PENDING`이 N분 이상 유지된 detail 감지 (신규) |
+| 정체 감지 | 관리자 문제 마켓 API (`PENDING` 3분 초과) | 동일 기능 재사용 (§6.3) |
 
 API 응답 **구조**는 바뀌지 않는다. `IN_PROGRESS` 계열 상태는 현재 명세(`MARKET_API_SPEC.md`)에 이미 정의되어 있다.
 
@@ -142,9 +142,40 @@ item 멱등성 키는 기존 형식을 그대로 쓴다.
 |---|---|
 | MP 일시 장애 (DB 연결 실패 등) | consumer 재시도 (backoff). 메시지는 커밋되지 않으므로 유실 없음 |
 | MP 영구 실패 (예: 회원 없음) | 실패 결과 이벤트 발행 → Market detail `FAILED`. 관리자 확인 대상 |
-| 역직렬화 불가 등 처리 불가 메시지 | 재시도 후 DLQ 토픽으로 이동 |
+| 처리 불가 메시지 (깨진 JSON, 모르는 eventType/schemaVersion) | 재시도 없이 즉시 DLT |
 | Debezium / Kafka 중단 | outbox row가 DB에 남아 있으므로 재기동 후 binlog 위치부터 재발행 |
-| detail `PENDING` 장기 정체 | 정체 감지로 식별 후 조사 |
+| detail `PENDING` 장기 정체 | 정체 감지로 식별 후 조사 (§6.3) |
+
+### 6.1 재시도 정책 (확정)
+
+| # | 항목 | 정책 | 상태 |
+|---|---|---|---|
+| R1 | MP 요청 consumer | 4회 지수 backoff (1s→2s→4s→8s) 후 `market.point-requests-dlt`. `NonRetryableEventException`은 즉시 DLT | 구현 완료 (2단계) |
+| R2 | Market 결과 consumer | R1과 동일 정책, `memberpoint.point-results-dlt` | 3단계 |
+| R3 | DLT 처리 | **자동 재처리하지 않는다.** 원인 해결 후 스크립트로 원 토픽에 재발행. 소비 측이 멱등하므로 재발행해도 안전 | 5단계 (재발행 스크립트) |
+| R5 | 관리자 수동 재시도 API (`POST /refunds/retry`, `/settlements/retry`) | async 모드에서는 Feign 호출 대신, 대상 detail(`FAILED`, 정체된 `PENDING`)에 대해 **같은 item 멱등성 키 + 새 eventId**로 outbox 이벤트를 다시 기록한다 | 3단계 (환불), 4단계 (정산) |
+| R6 | 커넥터 장애 | outbox에 남아 있어 유실 없음. Connect REST로 상태 확인 후 재시작 (`INFRA_GUIDE.md`) | 5단계 (절차 문서화) |
+| R7 | outbox 보존 | 7일 보존 후 삭제 (Market, MP 각자 스케줄러). Debezium은 INSERT만 발행하므로 삭제는 발행에 영향 없음 | 5단계 |
+
+R4(정체 감지)는 §6.3을 따른다. R5는 2단계 시점의 공백이다: async 모드에서도 관리자 수동 재시도가 Feign 동기 재전송을 한다 (멱등이므로 중복 지급은 없지만 경로가 섞인다).
+
+### 6.2 자동 재시도 스케줄러와의 관계
+
+async 모드에서 `MarketRefundRetryScheduler`(및 4단계 이후 `MarketSettlementRetryScheduler`)는 실행을 skip한다.
+`PENDING` detail은 Kafka로 처리 중이므로 Feign 재전송을 하지 않는다. 재시도는 consumer(R1, R2)가 담당한다.
+
+### 6.3 감지 (확정)
+
+감지는 세 층으로 나눈다. CDC는 **변경**만 잡으므로 "아무 일도 일어나지 않음(정체)"은 타이머가 필요하다.
+비즈니스 정체의 최종 판단은 SSOT인 DB로 한다. 스트림 처리 기반 정체 감지(Kafka Streams / Flink 타이머)는 도입하지 않는다.
+
+| 층 | 감지 대상 | 방법 | 단계 |
+|---|---|---|---|
+| 문제 발생 | DLT 유입 | DLT 토픽을 구독해 경고 로그 (즉시, 이벤트 기반) | 5단계 |
+| 파이프라인 정체 | 커넥터 중단, consumer 멈춤 | Connect REST 상태, `kafka-consumer-groups.sh --describe` lag 확인 절차 | 5단계 (절차 문서화) |
+| 비즈니스 정체 (R4) | detail `PENDING` 3분 초과 | 기존 관리자 문제 마켓 API (`adminProblemUnion`의 REFUND / SETTLEMENT) 재사용 | 기존 기능 |
+
+비즈니스 정체는 관리자가 화면을 열어야 보인다. 주기적 알림이 필요해지면 같은 조건을 1분 주기로 조회해 로그를 남기는 스케줄러를 추가한다 (현재 범위 아님).
 
 ---
 
@@ -311,10 +342,10 @@ CREATE TABLE market_outbox_event (          -- member-point: point_outbox_event
 - [x] member-point-mysql binlog/GTID 설정 및 Debezium 계정 → `infra/docker-compose.yml`, `infra/debezium/memberpoint-debezium-user.sql`
 - [x] 전송 방식·키 전략 설정 → Market `market.point-transport.mode` (`MARKET_POINT_TRANSPORT_MODE`, 기본 sync), `market.point-transport.request-key` (`MARKET_POINT_REQUEST_KEY`, 기본 member_id) / MP consumer `member-point.kafka.market-point-requests.enabled` (`MARKET_POINT_REQUESTS_CONSUMER_ENABLED`, 기본 false)
 - [x] DLQ → `{topic}-dlt` (`market.point-requests-dlt`). 재시도 4회 지수 backoff (1s→2s→4s→8s). 처리 불가(깨진 JSON, 모르는 eventType/schemaVersion)는 재시도 없이 DLT
-- [ ] 정체 감지 기준 시간과 방식
-- [ ] outbox row 보존 기간과 삭제 주기
+- [x] 정체 감지 → 기존 관리자 문제 마켓 API 재사용, 스트림 기반 감지 미도입 (§6.3)
+- [x] outbox row 보존 → 7일 후 삭제 (§6.1 R7)
 - [ ] CI 스키마 호환성 검사 (Schema Registry, E3)
-- [ ] 늦게 도착한 spend 보상: 재확인 기간, 보상 eventType, prediction 상태 (§12.6)
+- [x] 늦게 도착한 spend → 보상이 아닌 **펜싱**으로 예방 (§12.6)
 
 ---
 
@@ -324,10 +355,10 @@ CREATE TABLE market_outbox_event (          -- member-point: point_outbox_event
 |---|---|---|
 | 1 | 설계 확정 (이 문서 + 이벤트 스키마 + ERD) — **완료** | 문서 리뷰 |
 | 2 | **환불 요청 방향** — **완료**: Market outbox (Flyway V2), 환불 준비 TX에서 outbox 기록, 커넥터 등록, MP consumer. async 모드에서 환불 재시도 스케줄러는 skip | 무효 처리 → MP `point_history` 생성, 같은 메시지 재전달 시 `ALREADY_PROCESSED` |
-| 3 | **환불 결과 방향**: MP outbox, 결과 이벤트, Market consumer 완료 판정 | 무효 → `VOIDED` 자동 완료, MP 중단·재기동 후에도 유실 없음 |
+| 3 | **환불 결과 방향**: MP outbox, 결과 이벤트, Market consumer 완료 판정 (R2), async 수동 재시도 outbox 재기록 (R5) | 무효 → `VOIDED` 자동 완료, MP 중단·재기동 후에도 유실 없음, 수동 재시도가 Feign을 호출하지 않음 |
 | 4 | **정산 적용**: 2~3 구조를 정산에 적용 | 정산 → `SETTLED`, 기존 정산 테스트 통과 |
-| 5 | 정리: 정체 감지, DLQ, 실험 수행 및 결과 기록 | 전체 테스트, 실험 결과 문서화 |
-| 6 | (선택) **늦게 도착한 spend 보상** (§12.6): 문서 갱신 후 보상 환불 이벤트 구현 | `NOT_FOUND`→`FAILED` 이후 spend가 처리되어도 보상 환불로 잔액 복구 |
+| 5 | 정리: DLT 재발행 스크립트 (R3), DLT 경고·lag·커넥터 점검 절차 (R6, §6.3), outbox 삭제 (R7), 실험 수행 및 결과 기록 | 전체 테스트, 실험 결과 문서화 |
+| 6 | **spend 펜싱** (§12.6): MP `POST /internal/api/v1/points/spend/fence`, Market 대사 `NOT_FOUND` 처리 변경 | 펜싱 후 늦게 도착한 spend가 차감하지 못함, 펜싱과 spend 동시 실행 시 결과가 하나로 결정됨 |
 
 환불을 먼저 하는 이유: 원금 반환이라 금액 계산이 없고, 정산은 배당 계산·잔여 소각·reputation task 생성이 얽혀 있다.
 item 단위 처리 구조는 동일하므로 환불로 파이프라인을 검증한 뒤 정산에 적용한다.
@@ -416,9 +447,9 @@ MP가 Market의 prediction 데이터를 알아야 하므로 서비스 경계가 
 | 정산 완료 → Insight 신뢰도 업데이트 | Market은 결과를 기다리지 않는다. 현재 `market_reputation_update` polling을 이벤트 구독으로 대체 가능 |
 | 정산·무효 → 알림, 분석 (향후) | 구독자를 추가해도 Market 변경이 필요 없다 |
 
-### 12.6 남은 보상 지점: 늦게 도착한 spend
+### 12.6 늦게 도착한 spend — 펜싱으로 예방 (확정)
 
-대사에서 MP 거래가 `NOT_FOUND`면 prediction을 즉시 `FAILED`(종결)로 바꾼다 (`PredictionSpendReconciliationService`).
+**문제.** 대사에서 MP 거래가 `NOT_FOUND`면 prediction을 즉시 `FAILED`(종결)로 바꾼다 (`PredictionSpendReconciliationService`).
 
 ```text
 spend 요청 timeout → POINT_UNKNOWN
@@ -427,10 +458,36 @@ spend 요청 timeout → POINT_UNKNOWN
 ```
 
 `FAILED` 이후 다시 확인하는 경로가 없어 차감이 남는다. 발생 빈도는 낮지만 사용자 포인트가 사라지는 방향의 오류다.
-이 경우는 분기점(T2)이 Saga 종결 이후에 성공한 것이므로 **backward recovery(보상)**가 맞다.
 
-보상 방안 (미구현, §11 6단계):
+**결정: 보상(사후 환불)이 아니라 펜싱(사전 차단)으로 해결한다.**
+Saga 용어로는 보상(compensation)이 아닌 대응책(countermeasure)이다. 되돌릴 일을 만들지 않는다.
 
-1. `NOT_FOUND`로 `FAILED` 처리한 prediction을 일정 기간 동안 다시 조회한다.
-2. 나중에 `PROCESSED`가 확인되면 보상 환불 이벤트를 `market.point-requests`로 발행한다 (기존 파이프라인 재사용).
-3. 새 `eventType`과 prediction 상태가 필요하므로 `MARKET_FAILURE_SCENARIO.md`, `MARKET_ERD.md`, 이벤트 스키마를 먼저 갱신한다 (Market `AGENTS.md`: 문서에 없는 상태·ErrorCode 추가 금지).
+근거: MP `spend`는 같은 `Idempotency-Key`의 `point_history`가 이미 있으면 차감하지 않는다 (같은 요청 + `FAILED`면 거절, 다른 요청이면 `IDEMPOTENCY_KEY_CONFLICT`).
+따라서 해당 키에 실패 기록을 **먼저** 남기면 늦게 도착한 spend는 차감할 수 없다.
+
+```text
+대사: GET /transactions → NOT_FOUND
+→ POST /internal/api/v1/points/spend/fence (같은 Idempotency-Key, 원래 spend와 같은 요청 내용)
+   ├─ 키 없음  → point_history FAILED(fail_reason=POINT_SPEND_FENCED) 기록 → status FAILED
+   └─ 키 있음  → 기존 상태 그대로 반환 (spend가 먼저 처리됐으면 PROCESSED)
+→ Market: FAILED면 prediction FAILED, PROCESSED면 가격 확정 재시도 (forward recovery)
+```
+
+**동시 실행.** 펜싱과 지연된 spend는 같은 `point_history.idempotency_key` UNIQUE를 두고 경쟁하고, DB가 하나만 통과시킨다.
+
+| 먼저 커밋된 쪽 | 결과 |
+|---|---|
+| 펜싱 | 늦은 spend는 기존 row를 보고 거절된다. 조회 직후 끼어든 경우에도 INSERT가 UNIQUE 위반으로 실패하고, 같은 트랜잭션의 잔액 차감이 함께 롤백된다 |
+| spend | 펜싱은 기존 `PROCESSED`를 반환하고, Market은 prediction을 확정한다 |
+
+**검토한 대안 (채택하지 않음).** `FAILED` 처리 후 일정 기간 재조회해 `PROCESSED`가 보이면 보상 환불 이벤트를 발행하는 방식.
+재확인 기간 이후 도착하면 여전히 유실되고, 사용자에게 차감 후 환불이 보이며, 보상 eventType·prediction 상태·재확인 스케줄러가 새로 필요하다.
+
+**변경 범위 (§11 6단계).**
+
+| 서비스 | 변경 | 문서 |
+|---|---|---|
+| Member-Point | `POST /internal/api/v1/points/spend/fence` 추가. 펜싱된 키로 spend가 오면 `POINT_SPEND_FENCED`(409)로 거절 | `MEMBER_POINT_API_SPEC.md` 3-5, `MEMBER_POINT_ERROR_CODE.md`, 루트 `ERROR_POLICY.md` |
+| Market | 대사에서 `NOT_FOUND`면 펜싱 호출 후 결과에 따라 처리 | `MARKET_FAILURE_SCENARIO.md` 5-6 |
+
+Market의 prediction 상태와 이벤트 스키마는 바뀌지 않는다. "NOT_FOUND는 자동 재차감하지 않는다"는 기존 원칙도 유지된다 (펜싱은 실패를 확정할 뿐 차감하지 않는다).

@@ -852,7 +852,7 @@ poll (최대 max.poll.records건)
 | Q1 | 실패 구분 | **처리 불가**(깨진 JSON, 모르는 타입·버전, 필수 필드 누락, detail 없음): 그 건만 DLT, 재시도 없음. **일시 장애**(DB 연결, 락 timeout, 데드락 희생): 배치 재시도 |
 | Q2 | 처리 불가 건 분리 | ① 파싱 단계 실패는 트랜잭션 전에 제외. ② detail 없음은 예외로 롤백하지 않고 결과로 수집해 나머지를 커밋. **순서: DB 커밋 → DLT → offset 커밋.** offset이 마지막이므로 어디서 중단돼도 같은 배치가 다시 오고, 반영은 멱등이라 유실 없음 (DLT 중복은 가능하나 무해) |
 | Q3 | poison pill | 알 수 없는 예외 → 배치 재시도 2회 (짧은 backoff) → 그래도 실패하면 **이 배치만 건 단위 트랜잭션으로 fallback** → 원인 건만 기존 정책(4회 재시도 후 DLT)으로 격리. ~~진짜 DB 장애는 건 단위에서도 모두 실패하므로 DLT로 보내지 않고 대기~~ (정정: 이 구조만으로는 장애가 약 10분을 넘으면 DLT로 간다. 실패마다 DB 상태를 확인해 장애와 메시지 문제를 구분한다 → §16.2) |
-| Q4 | 배치 크기·순서 | `max.poll.records = 100` (`KAFKA_MAX_POLL_RECORDS`). poll은 그 순간 도착한 만큼만 가져오므로 한가할 때 추가 지연 없음. 배치 안에서 **받은 순서대로 순차 반영** (정렬·dedup·병렬 금지) + SUCCESS 종결 가드로 이중 보장. 완료 판정은 배치당, 등장한 정산·무효마다 1회 |
+| Q4 | 배치 크기·순서 | `max.poll.records = 500` (`KAFKA_MAX_POLL_RECORDS`, 처음 100 → §17.11 측정 후 500). poll은 그 순간 도착한 만큼만 가져오므로 한가할 때 추가 지연 없음. 배치 안에서 **받은 순서대로 순차 반영** (정렬·dedup·병렬 금지) + SUCCESS 종결 가드로 이중 보장. 완료 판정은 배치당, 등장한 정산·무효마다 1회 |
 | Q5 | 락 | 현재 데드락 경로 없음 (market마다 writer 1개, R5는 market 1개만 잠금). 방어로 **배치 시작 시 배치의 market을 ID 오름차순으로 선잠금**, 처리 순서는 받은 순서. 규칙: 여러 market을 잠그는 코드는 ID 오름차순. 배치 트랜잭션 약 0.2초, 사용자 영향 없음 |
 | Q6 | 검증 | 정합성 테스트(배치 반영, 순서, 다중 market, 처리 불가 ①②, poison pill, 진짜 장애, 락 순서) + suite 재실행 before/after (Market 완료 시간, MP→Market 간격, COMMIT 횟수, spend 간섭 불변) + 장애 주입 E2E (DB 트리거 poison pill, DB 계정 잠금으로 짧은·긴 장애, poison + 장애 동시, MP DB 장애). 수행 결과 ⑥. `docker pause`는 연결이 응답 없이 멈춰 장애 시점 판단이 어려워 계정 잠금으로 대체. consumer 중단은 미수행 (Connect 정지는 계획 외로 관찰) |
 
@@ -1063,3 +1063,21 @@ SET m.point_balance = m.point_balance + v.amount
 병렬도를 올리면 spend p95가 커진다(병렬도 12에서 안전선 초과). 따라서 **배치 100, 병렬도 3을 유지**한다.
 정산 전체 시간을 줄이려면 다음 대상은 Market 결과 반영(결과 key `market_id`라 한 마켓 = thread 1개)과 CDC 구간이다.
 측정 도구: `scripts/bench/settlement/sweep.sh` (MP 전용 인자는 `apps.sh`의 `MP_APP_ARGS`).
+
+### 17.11 Market 결과 배치 크기 · Debezium poll 간격 · 구간별 시간 (측정·적용, 결과 ⑯)
+
+**구간별 시간**: `scripts/bench/settlement/stage-breakdown.sh`로 정산 1회를 다음 구간으로 나눴다 (정산 API 시작 기준).
+정산 준비 커밋(API 응답) → CDC 전달 + MP 첫 배치(MP 첫 결과 outbox) → MP 처리 구간(첫~마지막 결과 outbox) → Market 꼬리(마지막 결과 outbox ~ 마켓 SETTLED).
+Market 배치 100에서 Market 꼬리가 약 3.4초로 가장 컸다. CDC 전달은 0.1초 미만이라 대상이 아니다.
+
+**Market 결과 배치 크기**: `max.poll.records`를 100 → **500**으로 바꿨다 (③ 7.07 → 4.40초, Market 꼬리 3.4 → 0.76초, spend p95 악화 없음). 1000은 500과 차이가 없다.
+배치 크기는 상한이라 결과가 적게 도착할 때는 지연이 늘지 않는다 (§16.1 Q4). 실패 시 재시도·DB 대기 동작은 같다.
+
+**Debezium `poll.interval.ms`**: 500 → 100 / 20ms로 줄여도 ③이 변하지 않아(4.35 / 4.34초) 기본 500ms를 유지한다.
+
+**MP 배치·병렬도 재확인 (Market 500 위에서)**: MP를 빠르게 하면(배치 200, 병렬도 6·12) MP 처리 구간은 줄지만 Market 꼬리가 그만큼 늘어 ③은 같다.
+MP 첫 결과 ~ 마켓 SETTLED가 설정과 무관하게 약 3.3~3.5초로 일정하다 → 이제 병목은 Market 결과 consumer(한 마켓 = thread 1개, D5)다.
+MP는 **배치 100, 병렬도 3을 유지**한다 (§17.10과 같은 결론).
+
+**남은 관찰**: 정산 준비 커밋(정산 상세 1만 건 + 요청 outbox 한 트랜잭션)이 오전 1.3~1.5초, 오후 2.0~5.6초로 크게 흔들렸다. 원인 미확인 (측정 PC 사용 영향 가능성).
+측정 도구: `sweep-market.sh`(Market 배치·poll), `sweep-combo.sh`(MP 조합, `SWEEP_MARKET_BEST`로 Market 설정 고정), `apps.sh`의 `MARKET_APP_ARGS`.

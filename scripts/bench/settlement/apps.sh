@@ -4,6 +4,7 @@
 #   ./scripts/bench/settlement/apps.sh build                     # bootJar 빌드 (코드 변경 시)
 #   ./scripts/bench/settlement/apps.sh start <sync|async> [member_id|market_id]
 #   MP_APP_ARGS="--spring.kafka.consumer.max-poll-records=200" ./scripts/bench/settlement/apps.sh start async   # MP에만 추가 인자
+#   MARKET_APP_ARGS="--spring.kafka.consumer.max-poll-records=500" ./scripts/bench/settlement/apps.sh start async # Market에만 추가 인자
 #   ./scripts/bench/settlement/apps.sh stop
 #   ./scripts/bench/settlement/apps.sh status
 #
@@ -68,7 +69,7 @@ case "${1:-}" in
     MARKET_POINT_TRANSPORT_MODE="$mode" MARKET_POINT_REQUEST_KEY="${key/na/member_id}" MARKET_POINT_RESULTS_CONSUMER_ENABLED=true \
     MEMBER_POINT_CLIENT_MODE=http MEMBER_POINT_SERVICE_URL=http://localhost:8080 \
     MARKET_OUTBOX_CLEANUP_SCHEDULER_ENABLED=false MARKET_REPUTATION_UPDATE_SCHEDULER_ENABLED=false \
-      nohup java -jar "$market_jar" --market.scheduler.prediction-reconciliation.enabled=false > "$market_log" 2>&1 &
+      nohup java -jar "$market_jar" --market.scheduler.prediction-reconciliation.enabled=false ${MARKET_APP_ARGS:-} > "$market_log" 2>&1 &
     wait_ready "$market_log" "Started MarketServiceApplication" "market"
 
     printf 'MODE=%s\nKEY=%s\nSTARTED=%s\n' "$mode" "$key" "$(date '+%Y-%m-%dT%H:%M:%S')" > "$STATE"

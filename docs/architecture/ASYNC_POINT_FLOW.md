@@ -35,7 +35,7 @@ Feign으로 동기 호출한다. 관리자 요청이 배치 처리 완료까지 
 |---|---|---|---|
 | D1 | SSOT | 각 서비스 DB. Kafka 토픽은 전달 통로 | 루트 `AGENTS.md` 섹션 5 |
 | D2 | 발행 방식 | 비즈니스 데이터와 같은 트랜잭션에서 outbox row 기록 → Debezium Outbox Event Router로 발행 | dual write 금지 |
-| D3 | 이벤트 단위 | **회원(prediction) 1건당 이벤트 1개** | 부분 실패 격리, 짧은 lock 보유, 메시지 크기 일정 (§3.1) |
+| D3 | 이벤트 단위 | **회원(prediction) 1건당 이벤트 1개** (정산 지급은 크기 상한이 있는 묶음으로 변경 예정, §18) | 부분 실패 격리, 짧은 lock 보유, 메시지 크기 일정 (§3.1) |
 | D4 | 요청 토픽 키 | **`member_id`** | MP에서 병렬 처리, 동일 회원은 순차 처리되어 잔액 row lock 경합 없음 (§3.2) |
 | D5 | 결과 토픽 키 | **`market_id`** | Market에서 마켓 단위 순차 처리되어 완료 판정 경쟁 없음 (§3.2) |
 | D6 | 전송 방식 전환 | 설정으로 `sync` / `async` 전환 가능하게 둔다 | before/after 실험, 롤백 경로 확보 |
@@ -1081,3 +1081,162 @@ MP는 **배치 100, 병렬도 3을 유지**한다 (§17.10과 같은 결론).
 
 **남은 관찰**: 정산 준비 커밋(정산 상세 1만 건 + 요청 outbox 한 트랜잭션)이 오전 1.3~1.5초, 오후 2.0~5.6초로 크게 흔들렸다. 원인 미확인 (측정 PC 사용 영향 가능성).
 측정 도구: `sweep-market.sh`(Market 배치·poll), `sweep-combo.sh`(MP 조합, `SWEEP_MARKET_BEST`로 Market 설정 고정), `apps.sh`의 `MARKET_APP_ARGS`.
+
+## 18. 정산 지급 요청·결과를 묶음(chunk) 이벤트로 (설계 확정, 구현 전)
+
+### 18.1 근거와 기대
+
+§17.11 구간 분석과 run 14 probe(Market DB statement digest, 배치별 처리 시각)에서 남은 비용은 대부분 **메시지 수(= 승자 수)에 비례**한다.
+
+| 구간 | 비용 (승자 1만 명, Market 결과 배치 500) | 메시지 수 비례 부분 |
+|---|---|---|
+| 정산 준비 커밋 1.34초 | detail INSERT 0.69초, **요청 outbox INSERT 1만 행 0.60초** | outbox 행 |
+| MP 처리 2.26초 | 이력·잔액·**결과 outbox 1만 행**, 레코드별 파싱 | 결과 outbox 행, 레코드 수 |
+| Market 결과 처리 3.0~3.4초 | thread 1개가 500건당 약 150ms (DB 약 95ms + 앱 약 55ms: 레코드별 파싱·매핑) | 레코드 수 |
+
+업계 사례도 같은 방향이다: 묶음 조회·JDBC batch로 I/O를 청크 수로 줄이고 미리 나눈 범위로 병렬화(토스페이먼츠 정산 개편), 대량 묶음 처리(TigerBeetle).
+**기대(추정, 구현 후 측정으로 확인)**: ③ 약 4.4초 → 2.5~3초. 그 뒤 병목은 MP(병렬도는 spend 간섭으로 제한, ⑮⑯)와 detail INSERT로 옮겨갈 것으로 본다.
+Market 결과 처리의 마켓 내 병렬화(결과 키 변경, 남은 묶음 카운터)는 이 단계 측정 후 별도로 정한다.
+
+### 18.2 D3와의 관계
+
+D3(회원 1명 = 이벤트 1개)가 마켓 단위 묶음을 탈락시킨 이유(§3.1)를 묶음 설계가 모두 지킨다.
+
+| §3.1 이유 | 묶음 설계 |
+|---|---|
+| 한 명 영구 실패 → 묶음 전체 롤백·DLQ | 묶음 안에서도 **건별 결과**(성공 / 실패 + errorCode)를 기록·회신. 업무 실패는 지금처럼 그 건만 `FAILED` |
+| TX 하나가 회원 N명 lock | MP는 묶음을 **하위 TX(기본 100건)** 로 나눠 처리. lock 보유 범위는 지금(배치 100)과 같다 |
+| 메시지 크기가 참여자 수에 비례 | 마켓 전체가 아니라 **최대 chunk-size(기본 500)건**. 공통 필드는 묶음에 1번. 약 100KB로 Kafka 기본 1MB 한도 안 |
+
+### 18.3 결정
+
+| # | 항목 | 결정 | 근거 |
+|---|---|---|---|
+| C1 | 범위 | **정산 지급만**. 환불은 회원별(v1) 유지 | 위험을 나눠 검증. 환불도 같은 구조로 옮기기 쉽게 만든다 (대형 마켓 무효 시 같은 문제) |
+| C2 | 묶음 크기 | `chunk-size` 기본 **500** (설정값) | ⑯ Market 결과 배치 최적값 참고. 묶음 크기 자체는 구현 후 100/250/500/1000 비교로 확정 |
+| C3 | MP TX 단위 | 묶음을 **100건씩 하위 TX**로 처리, 하위 TX마다 결과 outbox **1행**(그 100건의 건별 결과) | ⑮⑯: 배치·병렬도를 키우면 spend만 나빠진다. 기존 `MarketPointCreditBatchApplier`를 그대로 쓴다 |
+| C4 | 계약 | 같은 토픽, **`schemaVersion: 2`** (§8.5). 요청 eventType은 그대로, 결과는 새 eventType `POINT_CREDIT_RESULTS` | consumer가 v1·v2를 모두 처리하게 먼저 배포한 뒤 producer 전환. 결과 형식은 요청 형식을 따른다 (v1 요청 → v1 결과, v2 요청 → v2 결과) |
+| C5 | 키 | 요청 key `{marketId}:{chunkNo}` (D4 변경), 결과 key `market_id` 유지 (D5) | 묶음이 파티션에 고루 퍼진다. 묶음은 `member_id` 순으로 잘라 같은 회원이 여러 묶음에 걸치는 일을 줄인다. 걸쳐도 MP는 회원 ID 오름차순 lock이라 대기만 있고 교착은 없다 |
+| C6 | 전환 스위치 | Market `market.point-transport.settlement-request-format`: `ITEM`(v1) / `CHUNK`(v2), `settlement-request-chunk-size` | D6처럼 before/after 실험과 롤백 경로 |
+| C7 | 멱등성 | **건별 키·request hash 그대로**. 묶음 eventId는 추적용 | MP `point_history.idempotency_key` UNIQUE, Market detail 단조 전이가 그대로 정합성 근거. 묶음 중복·재전달은 건별로 `ALREADY_PROCESSED` |
+
+### 18.4 이벤트 (v2)
+
+요청 (`market.settlement-payout-requests`, key `{marketId}:{chunkNo}`):
+
+```json
+{
+  "eventId": "…", "eventType": "MARKET_SETTLEMENT_PAYOUT_REQUESTED", "schemaVersion": 2,
+  "occurredAt": "…", "producer": "market-service",
+  "data": {
+    "marketId": 42, "chunkNo": 3, "referenceType": "MARKET_PREDICTION", "reason": "…",
+    "items": [
+      { "predictionId": 7, "memberId": 1001, "amount": "300.00", "referenceId": 7,
+        "idempotencyKey": "MARKET_SETTLEMENT_REWARD:market:42:prediction:7:member:1001" }
+    ]
+  }
+}
+```
+
+결과 (`memberpoint.point-results`, key `market_id`):
+
+```json
+{
+  "eventId": "…", "eventType": "POINT_CREDIT_RESULTS", "schemaVersion": 2,
+  "occurredAt": "…", "producer": "member-point-service",
+  "data": {
+    "requestEventId": "…", "requestEventType": "MARKET_SETTLEMENT_PAYOUT_REQUESTED", "marketId": 42,
+    "items": [
+      { "predictionId": 7, "memberId": 1001, "idempotencyKey": "…", "amount": "300.00",
+        "status": "PROCESSED", "balanceSnapshot": "1300.00" },
+      { "predictionId": 8, "memberId": 1002, "idempotencyKey": "…", "amount": "50.00",
+        "status": "FAILED", "errorCode": "MEMBER_NOT_FOUND" }
+    ]
+  }
+}
+```
+
+- 건별 `status`: `PROCESSED` / `ALREADY_PROCESSED` (Market: SUCCESS) / `FAILED` (Market: FAILED). v1의 `POINT_CREDITED` / `POINT_CREDIT_FAILED`와 같은 의미.
+- 새 스키마 파일: `contracts/events/market.settlement-payout-requests.v2.schema.json`, `memberpoint.point-results.v2.schema.json`.
+
+### 18.5 처리 흐름과 실패 처리
+
+```text
+[Market TX] prepareSettlement
+  detail × N (그대로) → member_id 순 정렬 → chunk-size씩 outbox 1행
+      ▼
+[MP] 묶음 레코드마다: 검증 → items를 100건씩 → 하위 TX마다 applyWithFallback (배치 3회 → 건 단위 fallback)
+      하위 TX = 이력·잔액 + 결과 outbox 1행(v2)
+      ▼
+[Market] 레코드의 items를 펼쳐 최대 max-batch-items(기본 500)건씩 TX 1개 (기존 PointResultBatchApplier). 레코드 중간에서 잘려도 건별 멱등이라 무방
+```
+
+| # | 상황 | 처리 |
+|---|---|---|
+| F1 | MP: 묶음 파싱 실패·필수 필드 누락·스키마 버전 불일치 | 묶음 전체 NonRetryable → DLT (발행 측 버그). 해당 detail은 `PENDING`으로 남고 S3(3분 초과 PENDING) 감지·R5 재시도 대상 |
+| F2 | MP: 건의 업무 실패 (회원 없음, 금액 오류, 키 충돌) | 지금과 같이 그 건만 `FAILED` 결과. 묶음 나머지는 정상 |
+| F3 | MP: 하위 TX가 예상 밖 예외 → 건 단위 fallback에서도 특정 건이 예외 | **그 건을 건너뛰고 묶음의 나머지 하위 TX를 끝까지 처리**한 뒤 레코드 실패를 알린다 → 재시도(앞부분은 `ALREADY_PROCESSED`로 결과 재회신) → DLT. 원인 건만 `PENDING`으로 남는다 (§3.1 격리 유지) |
+| F4 | MP: DB 장애 | 지금과 같이 DLT 대신 복구 대기(최대 1시간). 커밋된 하위 TX는 재처리 시 `ALREADY_PROCESSED` |
+| F5 | MP: 묶음 처리 중 프로세스 종료 | offset 미커밋 → 재전달 → 커밋된 하위 TX는 `ALREADY_PROCESSED`, 나머지는 처리. 결과 중복 회신은 Market에서 멱등 |
+| F6 | Market: 결과 건의 detail 없음 | 지금과 같이 나머지 건은 반영, 그 레코드는 NonRetryable → DLT. DLT 재처리도 멱등 |
+| F7 | 전환 중 같은 건이 v1·v2로 모두 도착 | request hash 입력(회원, 타입, 금액, referenceType, referenceId)이 같으므로 두 번째는 `ALREADY_PROCESSED`. **v1·v2 변환 결과의 hash 동일성을 테스트로 고정**한다 |
+
+**크기·시간 상한**
+- Market 적용 TX는 레코드 수가 아니라 **건수로 자른다** (최대 500). `VALUES ROW(?, ?)` 자리표시자(MySQL 상한 65,535)와 lock 범위를 지킨다.
+- MP 한 poll의 처리량: 레코드 100개 × 500건 = 5만 건 ≈ 12초 < `max.poll.interval.ms` 5분. 정산 지급 listener의 `max.poll.records`는 실험에서 함께 본다.
+- 묶음 1행 약 100KB: outbox `payload` JSON, Debezium `max.request.size`·토픽 `max.message.bytes`(기본 1MB) 안.
+
+**R5 · 대사**: 정산 재시도(`prepareSettlementRetry`)는 같은 `appendSettlementPayoutRequests`를 쓰므로 재시도 대상 detail만 묶음으로 다시 발행된다 (건별 키 그대로, 새 eventId).
+
+### 18.6 검증 계획
+
+1. 계약: v2 스키마 파일 + 양쪽 계약 테스트. v1·v2 변환의 request hash 동일성(F7)
+2. MP: 묶음 → 하위 TX 분할, F1~F5 단위 테스트. v1 경로와 같은 입력이면 최종 상태(잔액·이력·결과 건별 상태)가 같은지 동등성 테스트 (mysqlit)
+3. Market: v2 결과 펼치기·건수 기준 TX 분할, F6. v1 결과와의 동등성 테스트 (mysqlit)
+4. 변형 검사: 하위 TX 분할 누락, F3에서 나머지를 처리하지 않음, 건별 FAILED를 묶음 전체에 적용 등을 넣어 테스트가 잡는지 확인
+5. E2E: `fault.sh`(poison, outage, outage-mp, stall-mp), 전환 중 v1·v2 혼재, verify PASS
+6. 성능: ITEM vs CHUNK before/after(번갈아 측정), chunk-size 100/250/500/1000, 구간별 시간, spend 안전선
+
+### 18.7 작업 순서
+
+```text
+1. 계약(v2 스키마) + MP v1·v2 수신         → 검증: 계약·동등성·hash 테스트
+2. Market v2 결과 수신                     → 검증: 동등성 테스트 (아직 v1만 흐름, 동작 변화 없음)
+3. Market 묶음 발행 + 스위치(ITEM/CHUNK)   → 검증: E2E·장애 주입, verify PASS
+4. 성능 측정 → 기본값(CHUNK, chunk-size) 확정 → 문서·실험 결과(⑰)
+```
+
+DTO(이벤트 계약) 변경이므로 팀 공유 대상이다 (루트 `AGENTS.md` §3).
+
+### 18.8 구현 기록
+
+**1단계 (계약 + MP v1·v2 수신, 완료)**
+- 계약: `contracts/events/market.settlement-payout-requests.v2.schema.json`, `memberpoint.point-results.v2.schema.json`.
+- MP: `MarketPointChunkRequestEvent`(v2 요청, 건마다 v1 모양으로 펼침. 펼친 건은 묶음의 eventId·`schemaVersion: 2`를 가진다).
+  `MarketPointRequestConsumer`는 정산 지급 토픽에서만 v2를 받는다(환불 토픽의 v2는 NonRetryable, C1). 트랜잭션은 레코드 수가 아니라 **건수**(`member-point.kafka.market-point-requests.max-batch-items`, 기본 100)로 나눈다. v1은 `max.poll.records` 100과 같아 동작이 같다.
+  `PointResultOutboxWriter`는 v2에서 펼친 건을 트랜잭션 안에서 요청 묶음(eventId)마다 결과 1행(`POINT_CREDIT_RESULTS`)으로 쓴다. 건 단위 fallback 경로도 v2면 v2 결과(건 1개)를 쓴다.
+- F3 구체화: 원인 건이 나온 **레코드(묶음)의 나머지 건은 끝까지 처리**하고, 그 뒤 레코드는 처리하지 않고 다시 전달받는다. v1(레코드 = 1건)에서는 기존 동작과 같다.
+- 검증: `MarketPointChunkEquivalenceTest`(mysqlit: v1·v2 판정·잔액·이력·건별 결과 동등, v1→v2·v2→v1 같은 건 1회 적립(F7), 묶음을 나눠 처리하면 트랜잭션마다 결과 1행 + v2 계약), `MarketPointRequestConsumerTest`(펼치기, 건수 분할, F1, F3).
+  변형 검사 6개(F3 경계, 건수 분할 제거, 묶음 결과를 v1로 기록, referenceId 오매핑(hash 불일치), 건별 status 오매핑, F3 중단) 모두 테스트가 잡는다.
+  기존 v1 흐름 E2E(승자 1만 명) verify PASS.
+- 1단계 보완: fallback에서 실패한 건의 레코드 위치·eventId·idempotencyKey를 경고 로그로 남긴다. 묶음은 DLT 레코드만으로 원인 건을 알 수 없어서다.
+
+**2단계 (Market v2 결과 수신, 완료)**
+- `PointResultChunkEvent`(v2 결과). `PointResultConsumer`는 v1·v2를 모두 받고, v2는 건으로 펼쳐 기존 `PointResultBatchApplier`에 넣는다(적용 로직 변경 없음).
+  트랜잭션은 **건수**(`market.kafka.point-results.max-batch-items`, 기본 500)로 나눈다. v1은 `max.poll.records` 500과 같아 동작이 같다. F3·원인 건 로그는 MP와 같다.
+  v2 결과는 정산 지급만 허용한다(환불 `requestEventType`은 NonRetryable). 건의 status가 모르는 값이거나 키가 없으면 묶음 전체 NonRetryable(F1과 같은 기준).
+- 검증: `PointResultBatchEquivalenceTest`(mysqlit: 같은 결과 순서를 건별 레코드와 묶음 레코드 2개로 실제 consumer에 넣어 detail·예측·마켓·정산·reputation 상태 동일, 묶음이 트랜잭션 여러 개에 걸치는 경우, detail 없음(F6)이 그 묶음 레코드 위치로 보고되고 정산 완료), `PointResultConsumerTest`(펼치기, 건수 분할, F6, 형식 오류, F3, v2 계약).
+  변형 검사 6개(F3 경계, 건수 분할 제거, FAILED를 성공으로, detail 없음 위치 오류, F3 중단, errorCode 누락) 모두 테스트가 잡는다. 기존 v1 흐름 E2E verify PASS.
+
+**3단계 (Market 묶음 발행 + 스위치, 완료. 기본값은 `item` 유지, 4단계 측정 후 결정)**
+- `market.point-transport.settlement-request-format`(`item` / `chunk`), `settlement-request-chunk-size`(기본 500, 1~1000. v2 스키마 `maxItems`). `PointRequestOutboxWriter`가 `member_id`, `prediction_id` 순으로 정렬해 묶음마다 outbox 1행, key `{marketId}:{chunkNo}`. 환불은 건별 그대로. R5 재시도도 같은 메서드라 재시도 대상만 묶음으로 다시 발행된다.
+- 검증: `PointRequestOutboxWriterTest`(정렬·경계·key·v2 계약·v1과 같은 건 값·환불 건별·크기 범위), `AsyncChunkSettlementTest`(정산 API와 R5 재시도가 묶음 발행). 변형 검사 6개(정렬 제거, 경계 오류, key, referenceId, 금액 정규화, 스위치 무시) 모두 잡는다.
+- E2E (`chunk`): 승자 1만 명 verify PASS (Market 요청 outbox 20행·약 91KB, MP 결과 outbox 100행·1만 건).
+  장애 주입(승자 2000명 = 묶음 4개, `fault.sh`에 MP 쪽 `poison-mp` 추가):
+
+| 시나리오 | 결과 |
+|---|---|
+| Market poison (700번째 건 detail UPDATE 실패) | 1999건 SUCCESS, 원인 1건 PENDING, Market 결과 DLT 1건(묶음) → 트리거 해제 + `replay-dlt.sh` → SETTLED, verify PASS |
+| MP poison (700번째 건 이력 INSERT 실패) | 1999건 SUCCESS, 원인 1건 PENDING, MP 요청 DLT 1건(묶음 500건) → 해제 + 재처리 → SETTLED, verify PASS. 원인 건 로그(idempotencyKey)로 식별 |
+| Market DB 20초 장애 | DLT 0, SETTLED, verify PASS |
+| MP DB 20초 장애 | DLT 0, SETTLED, verify PASS |

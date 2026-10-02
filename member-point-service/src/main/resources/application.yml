@@ -44,6 +44,8 @@ member-point:
       # consumer 전용 DB 커넥션 풀 크기 (벌크헤드). spend 등 API 풀(spring.datasource.hikari, 기본 10)과 분리한다.
       # 동시에 도는 consumer thread 수(정산 지급 3 + 환불 3)와 맞춘다 (ASYNC_POINT_FLOW.md §17.7)
       pool-size: ${MARKET_POINT_REQUESTS_POOL_SIZE:6}
+      # 적립 트랜잭션 1개의 최대 건수. 정산 지급 묶음(v2)은 이 크기로 나눠 처리한다 (ASYNC_POINT_FLOW.md §18.3 C3)
+      max-batch-items: ${MARKET_POINT_REQUESTS_MAX_BATCH_ITEMS:100}
       # DB 장애(실패 직후 SELECT 1도 실패) 시 DLT 대신 기다린다. 한 번의 대기는 max.poll.interval.ms(5분)보다 짧아야 한다 (ASYNC_POINT_FLOW.md §16.1 Q3)
       db-unavailable:
         retry-interval-ms: ${MARKET_POINT_REQUESTS_DB_RETRY_INTERVAL_MS:30000}

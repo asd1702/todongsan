@@ -13,6 +13,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.todongsan.marketservice.market.outbox.EventContract;
 import com.todongsan.marketservice.market.service.MarketRefundTransactionService;
 import com.todongsan.marketservice.market.service.MarketSettlementTransactionService;
 import com.todongsan.marketservice.market.service.PointResultApplyOutcome;
@@ -54,7 +55,7 @@ class PointResultConsumerTest {
     @BeforeEach
     void setUp() {
         consumer = new PointResultConsumer(
-                new ObjectMapper(), batchApplier, refundTransactionService, settlementTransactionService, jdbcTemplate);
+                new ObjectMapper(), batchApplier, refundTransactionService, settlementTransactionService, jdbcTemplate, 500);
     }
 
     @Test
@@ -217,6 +218,120 @@ class PointResultConsumerTest {
 
         assertThatThrownBy(() -> consumer.consume(records(credited("REFUND", 42, 7), credited("REFUND", 42, 8))))
                 .isInstanceOfSatisfying(DatabaseUnavailableException.class, e -> assertThat(e.getIndex()).isEqualTo(1));
+    }
+
+    @Test
+    void chunkResultIsExpandedToItems() {
+        stubBatchApplied();
+
+        consumer.consume(records(chunk(77, "\"status\": \"PROCESSED\", \"balanceSnapshot\": \"1300.00\"",
+                "\"status\": \"ALREADY_PROCESSED\", \"balanceSnapshot\": \"1300.00\"",
+                "\"status\": \"FAILED\", \"errorCode\": \"MEMBER_NOT_FOUND\"")));
+
+        assertThat(appliedItems()).containsExactly(
+                new Item(PointResultBatchApplier.MARKET_SETTLEMENT_PAYOUT_REQUESTED, 77L, key("SETTLEMENT", 77, 1), true, null),
+                new Item(PointResultBatchApplier.MARKET_SETTLEMENT_PAYOUT_REQUESTED, 77L, key("SETTLEMENT", 77, 2), true, null),
+                new Item(PointResultBatchApplier.MARKET_SETTLEMENT_PAYOUT_REQUESTED, 77L, key("SETTLEMENT", 77, 3), false,
+                        "MEMBER_NOT_FOUND"));
+    }
+
+    @Test
+    void transactionsAreSplitByItemCountNotRecordCount() {
+        consumer = new PointResultConsumer(
+                new ObjectMapper(), batchApplier, refundTransactionService, settlementTransactionService, jdbcTemplate, 2);
+        List<Integer> sizes = new ArrayList<>();
+        when(batchApplier.applyBatch(any())).thenAnswer(invocation -> {
+            List<Item> items = invocation.getArgument(0);
+            sizes.add(items.size());
+            return items.stream().map(item -> PointResultApplyOutcome.APPLIED).toList();
+        });
+
+        consumer.consume(records(chunk(77, PROCESSED, PROCESSED, PROCESSED), credited("SETTLEMENT", 77, 9)));
+
+        assertThat(sizes).containsExactly(2, 2);
+    }
+
+    @Test
+    void detailNotFoundInChunkIsReportedAtThatRecordAfterApplyingOthers() {
+        when(batchApplier.applyBatch(any())).thenReturn(List.of(
+                PointResultApplyOutcome.APPLIED, PointResultApplyOutcome.APPLIED,
+                PointResultApplyOutcome.DETAIL_NOT_FOUND, PointResultApplyOutcome.APPLIED));
+
+        assertThatThrownBy(() -> consumer.consume(records(chunk(77, PROCESSED), chunk(77, PROCESSED, PROCESSED, PROCESSED))))
+                .isInstanceOfSatisfying(PointResultRecordFailedException.class, e -> {
+                    assertThat(e.getIndex()).isEqualTo(1);
+                    assertThat(e.getCause()).isInstanceOf(NonRetryableEventException.class).hasMessageContaining("Detail not found");
+                });
+        verify(batchApplier, times(1)).applyBatch(any());
+    }
+
+    @Test
+    void malformedChunkIsNonRetryableAsWhole() {
+        String unknownStatus = chunk(77, PROCESSED, "\"status\": \"MAYBE\"");
+        String missingKey = chunk(77, PROCESSED).replaceFirst("\"idempotencyKey\": \"[^\"]+\"", "\"idempotencyKey\": null");
+        String refund = chunk(77, PROCESSED).replace("MARKET_SETTLEMENT_PAYOUT_REQUESTED", "MARKET_REFUND_REQUESTED");
+        String wrongType = chunk(77, PROCESSED).replace("POINT_CREDIT_RESULTS", "POINT_CREDITED");
+
+        assertThatThrownBy(() -> consumer.consume(records(unknownStatus, missingKey, refund, wrongType)))
+                .isInstanceOfSatisfying(PointResultRecordFailedException.class, e -> assertThat(e.getIndex()).isZero());
+        verify(batchApplier, never()).applyBatch(any());
+        for (String event : List.of(missingKey, refund, wrongType)) {
+            assertThatThrownBy(() -> consumer.consume(records(event)))
+                    .isInstanceOfSatisfying(PointResultRecordFailedException.class,
+                            e -> assertThat(e.getCause()).isInstanceOf(NonRetryableEventException.class));
+        }
+    }
+
+    @Test
+    void poisonInChunkSkipsOnlyThatItemAndFinishesTheChunk() {
+        consumer = new PointResultConsumer(
+                new ObjectMapper(), batchApplier, refundTransactionService, settlementTransactionService, jdbcTemplate, 2);
+        IllegalStateException poison = new IllegalStateException("poison");
+        when(batchApplier.applyBatch(any())).thenThrow(poison);
+        when(jdbcTemplate.queryForObject("SELECT 1", Integer.class)).thenReturn(1);
+        when(settlementTransactionService.applyAsyncSettlementResult(eq(77L), anyString(), anyBoolean(), any()))
+                .thenAnswer(invocation -> {
+                    if (invocation.getArgument(1).equals(key("SETTLEMENT", 77, 1))) {
+                        throw poison;
+                    }
+                    return PointResultApplyOutcome.APPLIED;
+                });
+
+        // 묶음(1, 2, 3)은 트랜잭션 2개(1·2 / 3). 1이 원인 건이어도 2·3은 반영하고, 뒤 레코드(9)는 다시 전달받는다
+        assertThatThrownBy(() -> consumer.consume(records(chunk(77, PROCESSED, PROCESSED, PROCESSED),
+                credited("SETTLEMENT", 77, 9))))
+                .isInstanceOfSatisfying(PointResultRecordFailedException.class, e -> {
+                    assertThat(e.getIndex()).isZero();
+                    assertThat(e.getCause()).isSameAs(poison);
+                });
+
+        verify(settlementTransactionService).applyAsyncSettlementResult(77L, key("SETTLEMENT", 77, 2), true, null);
+        verify(settlementTransactionService).applyAsyncSettlementResult(77L, key("SETTLEMENT", 77, 3), true, null);
+        verify(settlementTransactionService, never()).applyAsyncSettlementResult(77L, key("SETTLEMENT", 77, 9), true, null);
+    }
+
+    @Test
+    void chunkFixtureFollowsResultContract() {
+        String chunk = chunk(77, PROCESSED, "\"status\": \"FAILED\", \"errorCode\": \"MEMBER_NOT_FOUND\"");
+        assertThat(EventContract.load("memberpoint.point-results.v2.schema.json").validate(chunk)).isEmpty();
+    }
+
+    private static final String PROCESSED = "\"status\": \"PROCESSED\", \"balanceSnapshot\": \"1300.00\"";
+
+    /** ASYNC_POINT_FLOW.md §18.4 형식. 건마다 예측 1, 2, 3 ... */
+    private static String chunk(long marketId, String... statuses) {
+        List<String> items = new ArrayList<>();
+        for (int i = 0; i < statuses.length; i++) {
+            items.add("""
+                    {"predictionId": %d, "memberId": 1001, "idempotencyKey": "%s", "amount": "300.00", %s}"""
+                    .formatted(i + 1, key("SETTLEMENT", marketId, i + 1), statuses[i]));
+        }
+        return """
+                {"eventId": "d4e8f0d2-1a4b-4f6e-8d7c-5b9a0e2f3c11", "eventType": "POINT_CREDIT_RESULTS", "schemaVersion": 2,
+                 "occurredAt": "2026-10-02T18:00:00.456+09:00", "producer": "member-point-service",
+                 "data": {"requestEventId": "7f1c2a9e-4b0d-4c5e-9a51-2f7b3c8d1e04",
+                          "requestEventType": "MARKET_SETTLEMENT_PAYOUT_REQUESTED", "marketId": %d, "items": [%s]}}
+                """.formatted(marketId, String.join(", ", items));
     }
 
     private void stubBatchApplied() {

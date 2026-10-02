@@ -51,11 +51,17 @@ market:
     mode: ${MARKET_POINT_TRANSPORT_MODE:sync}
     # async 요청 토픽(market.refund-requests, market.settlement-payout-requests)의 Kafka key: member_id | market_id
     request-key: ${MARKET_POINT_REQUEST_KEY:member_id}
+    # 정산 지급 요청 형식: item(승자 1명 = 이벤트 1개, v1) | chunk(최대 chunk-size명 = 이벤트 1개, v2, key = {marketId}:{chunkNo}) (ASYNC_POINT_FLOW.md §18)
+    # chunk 전환 전에 MP가 v2를 받도록 먼저 배포한다 (§8.5)
+    settlement-request-format: ${MARKET_SETTLEMENT_REQUEST_FORMAT:item}
+    settlement-request-chunk-size: ${MARKET_SETTLEMENT_REQUEST_CHUNK_SIZE:500}
   kafka:
     point-results:
       # Member-Point 결과 이벤트 consumer. 전송 방식과 별도로 켠다 (sync로 되돌려도 이미 나간 요청의 결과는 반영해야 한다)
       enabled: ${MARKET_POINT_RESULTS_CONSUMER_ENABLED:false}
       topic: memberpoint.point-results
+      # 반영 트랜잭션 1개의 최대 건수. 묶음 결과(v2)는 레코드 하나에 여러 건이라 레코드 수가 아니라 건수로 자른다 (ASYNC_POINT_FLOW.md §18.5)
+      max-batch-items: ${MARKET_POINT_RESULTS_MAX_BATCH_ITEMS:500}
       # DB 장애(실패 직후 SELECT 1도 실패) 시 DLT 대신 기다린다. 한 번의 대기는 max.poll.interval.ms(5분)보다 짧아야 한다 (ASYNC_POINT_FLOW.md §16.1 Q3)
       db-unavailable:
         retry-interval-ms: ${MARKET_POINT_RESULTS_DB_RETRY_INTERVAL_MS:30000}

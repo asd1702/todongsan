@@ -76,7 +76,7 @@ class MarketPointRequestConsumerTest {
     @BeforeEach
     void setUp() {
         lenient().when(consumerDatabase.jdbcTemplate()).thenReturn(jdbcTemplate);
-        consumer = new MarketPointRequestConsumer(new ObjectMapper(), batchApplier, marketPointRequestService, consumerDatabase);
+        consumer = new MarketPointRequestConsumer(new ObjectMapper(), batchApplier, marketPointRequestService, consumerDatabase, 100);
     }
 
     @Test
@@ -238,6 +238,115 @@ class MarketPointRequestConsumerTest {
 
         assertThatThrownBy(() -> consumer.consumeSettlementPayout(records(PAYOUT_TOPIC, payoutEvent(7), payoutEvent(8))))
                 .isInstanceOfSatisfying(DatabaseUnavailableException.class, e -> assertThat(e.getIndex()).isEqualTo(1));
+    }
+
+    @Test
+    void 정산_지급_묶음은_건으로_펼쳐_SETTLE_MARKET_적립한다() {
+        stubBatchProcessed();
+
+        consumer.consumeSettlementPayout(records(PAYOUT_TOPIC, chunkEvent(7, 8)));
+
+        List<MarketPointCreditBatchApplier.Item> items = appliedItems();
+        assertThat(items).extracting(MarketPointCreditBatchApplier.Item::type)
+                .containsExactly(PointHistoryType.SETTLE_MARKET, PointHistoryType.SETTLE_MARKET);
+        MarketPointRequestEvent event = items.get(1).event();
+        assertThat(event.eventId()).isEqualTo(CHUNK_EVENT_ID);
+        assertThat(event.schemaVersion()).isEqualTo(2);
+        MarketPointRequestEvent.Data data = event.data();
+        assertThat(data.marketId()).isEqualTo(42L);
+        assertThat(data.predictionId()).isEqualTo(8L);
+        assertThat(data.memberId()).isEqualTo(1008L);
+        assertThat(data.amount()).isEqualByComparingTo(new BigDecimal("300.00"));
+        assertThat(data.referenceType()).isEqualTo("MARKET_PREDICTION");
+        assertThat(data.referenceId()).isEqualTo(8L);
+        assertThat(data.reason()).isEqualTo("정산 지급");
+        assertThat(data.idempotencyKey()).isEqualTo("MARKET_SETTLEMENT_REWARD:market:42:prediction:8:member:1008");
+    }
+
+    @Test
+    void 트랜잭션은_레코드_수가_아니라_건수로_나눈다() {
+        consumer = new MarketPointRequestConsumer(new ObjectMapper(), batchApplier, marketPointRequestService, consumerDatabase, 2);
+        List<Integer> sizes = new ArrayList<>();
+        when(batchApplier.applyBatch(any())).thenAnswer(invocation -> {
+            List<MarketPointCreditBatchApplier.Item> items = invocation.getArgument(0);
+            sizes.add(items.size());
+            return items.stream().map(item -> processed()).toList();
+        });
+
+        consumer.consumeSettlementPayout(records(PAYOUT_TOPIC, chunkEvent(1, 2, 3, 4, 5), payoutEvent(6)));
+
+        assertThat(sizes).containsExactly(2, 2, 2);
+    }
+
+    @Test
+    void 환불_토픽은_묶음을_받지_않는다() {
+        String refundChunk = chunkEvent(7).replace("MARKET_SETTLEMENT_PAYOUT_REQUESTED", "MARKET_REFUND_REQUESTED");
+        assertNonRetryableAt(() -> consumer.consumeRefund(records(REFUND_TOPIC, refundChunk)), 0, "Required field is missing");
+        verify(batchApplier, never()).applyBatch(any());
+    }
+
+    @Test
+    void 묶음의_eventType이_토픽과_다르면_재시도하지_않는다() {
+        String event = chunkEvent(7).replace("MARKET_SETTLEMENT_PAYOUT_REQUESTED", "MARKET_REFUND_REQUESTED");
+        assertNonRetryableAt(() -> consumer.consumeSettlementPayout(records(PAYOUT_TOPIC, event)), 0, "MARKET_REFUND_REQUESTED");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"predictionId", "memberId", "amount", "referenceId", "idempotencyKey"})
+    void 묶음_한_건의_필수_필드가_없으면_묶음_전체를_재시도하지_않는다(String field) {
+        String event = chunkEvent(7, 8).replaceFirst("(\"" + field + "\": )[^,}]+", "$1null");
+
+        assertNonRetryableAt(() -> consumer.consumeSettlementPayout(records(PAYOUT_TOPIC, event)), 0, "Required field is missing");
+        verify(batchApplier, never()).applyBatch(any());
+    }
+
+    @Test
+    void 묶음_안_원인_건은_건너뛰고_묶음의_나머지는_끝까지_처리한다() {
+        consumer = new MarketPointRequestConsumer(new ObjectMapper(), batchApplier, marketPointRequestService, consumerDatabase, 2);
+        IllegalStateException poison = new IllegalStateException("poison");
+        when(batchApplier.applyBatch(any())).thenThrow(poison);
+        when(jdbcTemplate.queryForObject("SELECT 1", Integer.class)).thenReturn(1);
+        when(marketPointRequestService.process(any(), any())).thenAnswer(invocation -> {
+            MarketPointRequestEvent event = invocation.getArgument(0);
+            if (event.data().predictionId() == 7L) {
+                throw poison;
+            }
+            return processed();
+        });
+
+        // 묶음(7, 8, 9)은 트랜잭션 2개(7·8 / 9)로 나뉜다. 7이 원인 건이어도 같은 트랜잭션의 8과 다음 트랜잭션의 9는 처리하고,
+        // 뒤 레코드(10)는 다시 전달받는다
+        assertThatThrownBy(() -> consumer.consumeSettlementPayout(records(PAYOUT_TOPIC, chunkEvent(7, 8, 9), payoutEvent(10))))
+                .isInstanceOfSatisfying(PointRequestRecordFailedException.class, e -> {
+                    assertThat(e.getIndex()).isZero();
+                    assertThat(e.getCause()).isSameAs(poison);
+                });
+
+        ArgumentCaptor<MarketPointRequestEvent> processed = ArgumentCaptor.forClass(MarketPointRequestEvent.class);
+        verify(marketPointRequestService, times(3)).process(processed.capture(), eq(PointHistoryType.SETTLE_MARKET));
+        assertThat(processed.getAllValues()).extracting(event -> event.data().predictionId()).containsExactly(7L, 8L, 9L);
+    }
+
+    private static final String CHUNK_EVENT_ID = "0b6f3c1d-2e4a-4f8b-9c7d-1a2b3c4d5e6f";
+
+    /** docs/architecture/ASYNC_POINT_FLOW.md §18.4 형식. 회원 ID = 1000 + predictionId */
+    private static String chunkEvent(long... predictionIds) {
+        List<String> items = new ArrayList<>();
+        for (long id : predictionIds) {
+            items.add("""
+                    { "predictionId": %d, "memberId": %d, "amount": "300.00", "referenceId": %d, "idempotencyKey": "MARKET_SETTLEMENT_REWARD:market:42:prediction:%d:member:%d" }"""
+                    .formatted(id, 1000 + id, id, id, 1000 + id));
+        }
+        return """
+                {
+                  "eventId": "%s",
+                  "eventType": "MARKET_SETTLEMENT_PAYOUT_REQUESTED",
+                  "schemaVersion": 2,
+                  "occurredAt": "2026-10-02T10:00:00.000+09:00",
+                  "producer": "market-service",
+                  "data": { "marketId": 42, "chunkNo": 0, "referenceType": "MARKET_PREDICTION", "reason": "정산 지급", "items": [ %s ] }
+                }
+                """.formatted(CHUNK_EVENT_ID, String.join(", ", items));
     }
 
     private void assertNonRetryableAt(org.assertj.core.api.ThrowableAssert.ThrowingCallable call, int index, String message) {

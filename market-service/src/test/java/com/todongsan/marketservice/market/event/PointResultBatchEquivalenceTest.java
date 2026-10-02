@@ -1,11 +1,14 @@
 package com.todongsan.marketservice.market.event;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.todongsan.marketservice.market.client.MemberPointClient;
+import com.todongsan.marketservice.market.service.MarketRefundTransactionService;
 import com.todongsan.marketservice.market.service.MarketSettlementTransactionService;
 import com.todongsan.marketservice.market.service.PointResultApplyOutcome;
 import com.todongsan.marketservice.market.service.PointResultBatchApplier;
@@ -15,6 +18,8 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -51,6 +56,12 @@ class PointResultBatchEquivalenceTest {
 
     @Autowired
     private MarketSettlementTransactionService settlementTransactionService;
+
+    @Autowired
+    private MarketRefundTransactionService refundTransactionService;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     @MockitoBean
     private MemberPointClient memberPointClient;
@@ -98,6 +109,74 @@ class PointResultBatchEquivalenceTest {
                 PointResultApplyOutcome.APPLIED            // 4 성공 → 정산 완료
         );
         assertThat(queryString("SELECT status FROM market WHERE id = " + BATCH_MARKET)).isEqualTo("SETTLED");
+    }
+
+    /**
+     * 묶음 결과(v2)는 건별 결과(v1)와 반영 결과가 같아야 한다 (ASYNC_POINT_FLOW.md §18.6).
+     * 같은 결과 순서를 건별 레코드(마켓 300)와 묶음 레코드 2개(마켓 400)로 실제 consumer에 넣는다.
+     * 묶음 쪽은 트랜잭션을 3건으로 잘라 묶음이 트랜잭션 여러 개에 걸치게 한다.
+     */
+    @Test
+    void 묶음_결과는_건별_결과와_반영_결과가_같다() {
+        PointResultConsumer perItem = new PointResultConsumer(objectMapper, batchApplier, refundTransactionService,
+                settlementTransactionService, jdbcTemplate, 500);
+        PointResultConsumer chunked = new PointResultConsumer(objectMapper, batchApplier, refundTransactionService,
+                settlementTransactionService, jdbcTemplate, 3);
+
+        perItem.consume(records(scenario(RECORD_MARKET).get(0).stream().map(this::v1Result).toArray(String[]::new)));
+        chunked.consume(records(v2Results(scenario(BATCH_MARKET).get(0))));
+        assertThat(state(BATCH_MARKET)).containsExactlyElementsOf(state(RECORD_MARKET));
+
+        // 두 번째 묶음에는 detail 없는 건(9)이 있다: 나머지는 반영하고 그 레코드를 재시도 없이 알린다
+        assertThatThrownBy(() -> perItem.consume(records(
+                scenario(RECORD_MARKET).get(1).stream().map(this::v1Result).toArray(String[]::new))))
+                .isInstanceOfSatisfying(PointResultRecordFailedException.class, e -> assertThat(e.getIndex()).isEqualTo(3));
+        assertThatThrownBy(() -> chunked.consume(records(v2Results(scenario(BATCH_MARKET).get(1)))))
+                .isInstanceOfSatisfying(PointResultRecordFailedException.class, e -> {
+                    assertThat(e.getIndex()).isEqualTo(1); // 두 번째 묶음 레코드
+                    assertThat(e.getCause()).isInstanceOf(NonRetryableEventException.class).hasMessageContaining("Detail not found");
+                });
+        assertThat(state(BATCH_MARKET)).containsExactlyElementsOf(state(RECORD_MARKET));
+        assertThat(queryString("SELECT status FROM market WHERE id = " + BATCH_MARKET)).isEqualTo("SETTLED");
+    }
+
+    private String v1Result(Item item) {
+        String extra = item.credited()
+                ? "\"status\": \"PROCESSED\", \"balanceSnapshot\": \"1300.00\""
+                : "\"errorCode\": \"" + item.errorCode() + "\"";
+        return """
+                {"eventId": "%s", "eventType": "%s", "schemaVersion": 1, "occurredAt": "2026-10-02T18:00:00.000+09:00",
+                 "producer": "member-point-service",
+                 "data": {"requestEventId": "%s", "requestEventType": "%s", "marketId": %d, "predictionId": 1,
+                          "memberId": 1, "idempotencyKey": "%s", "amount": "300.00", %s}}
+                """.formatted(UUID.randomUUID(), item.credited() ? "POINT_CREDITED" : "POINT_CREDIT_FAILED",
+                UUID.randomUUID(), SETTLEMENT, item.marketId(), item.idempotencyKey(), extra);
+    }
+
+    /** MP 트랜잭션 2개(앞 2건 / 나머지)의 결과처럼 묶음 레코드 2개로 만든다 */
+    private String[] v2Results(List<Item> items) {
+        return new String[]{v2Result(items.subList(0, 2)), v2Result(items.subList(2, items.size()))};
+    }
+
+    private String v2Result(List<Item> items) {
+        List<String> nodes = items.stream().map(item -> """
+                {"predictionId": 1, "memberId": 1, "idempotencyKey": "%s", "amount": "300.00", %s}"""
+                .formatted(item.idempotencyKey(), item.credited()
+                        ? "\"status\": \"PROCESSED\", \"balanceSnapshot\": \"1300.00\""
+                        : "\"status\": \"FAILED\", \"errorCode\": \"" + item.errorCode() + "\"")).toList();
+        return """
+                {"eventId": "%s", "eventType": "POINT_CREDIT_RESULTS", "schemaVersion": 2,
+                 "occurredAt": "2026-10-02T18:00:00.000+09:00", "producer": "member-point-service",
+                 "data": {"requestEventId": "%s", "requestEventType": "%s", "marketId": %d, "items": [%s]}}
+                """.formatted(UUID.randomUUID(), UUID.randomUUID(), SETTLEMENT, items.get(0).marketId(), String.join(", ", nodes));
+    }
+
+    private static List<ConsumerRecord<String, String>> records(String... values) {
+        List<ConsumerRecord<String, String>> records = new ArrayList<>();
+        for (int i = 0; i < values.length; i++) {
+            records.add(new ConsumerRecord<>("memberpoint.point-results", 0, i, "key", values[i]));
+        }
+        return records;
     }
 
     /** 승자 4명(예측 m*10+1..4)과 패자 1명. 정산 시작 API로 detail을 PENDING으로 만든다. */

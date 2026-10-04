@@ -25,5 +25,7 @@ kakao:
   api-base-url: http://localhost:9999
 
 member-point:
+  warmup:
+    enabled: false
   outbox-cleanup:
     enabled: false

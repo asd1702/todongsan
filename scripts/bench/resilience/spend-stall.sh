@@ -67,3 +67,7 @@ java -Dstdout.encoding=UTF-8 "$(cygpath -m "$DIR/StallAnalyze.java")" "$(cygpath
   "$stall_start" "$stall_end" | tee "$OUT/analysis.txt"
 echo "DB 예측 상태: $(mq -e "SELECT GROUP_CONCAT(CONCAT(status,'=',c)) FROM (SELECT status, COUNT(*) c FROM market_prediction WHERE market_id = $market_id GROUP BY status) t;")" \
   | tee -a "$OUT/analysis.txt"
+# 포기한(UNKNOWN) 요청 중 MP가 실제로 차감한 수 (SPEND_CIRCUIT_BREAKER.md §1)
+spent=$(mpq -e "SELECT COUNT(*) FROM point_history WHERE idempotency_key LIKE 'MARKET_PREDICTION_SPEND:market:$market_id:%';")
+confirmed=$(mq -e "SELECT COUNT(*) FROM market_prediction WHERE market_id = $market_id AND status = 'CONFIRMED';")
+echo "MP 차감 이력=$spent, Market CONFIRMED=$confirmed, 차감됐지만 확정 안 됨=$((spent - confirmed))" | tee -a "$OUT/analysis.txt"

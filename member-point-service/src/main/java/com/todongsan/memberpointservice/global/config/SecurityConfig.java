@@ -33,6 +33,8 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST, "/api/v1/members/token/refresh").permitAll()
                         // 내부 연계 API (서비스 간 호출, JWT 없이 호출됨 — Gateway에 /internal/** 경로 없어 외부 접근 자동 차단)
                         .requestMatchers("/internal/**").permitAll()
+                        // 헬스·readiness 프로브 (노출은 health만, 워밍업 뒤 UP: SPEND_CIRCUIT_BREAKER.md §6)
+                        .requestMatchers(HttpMethod.GET, "/actuator/health", "/actuator/health/**").permitAll()
                         // Swagger
                         .requestMatchers("/swagger-ui.html", "/swagger-ui/**", "/v3/api-docs/**").permitAll()
                         // 나머지 외부 API는 JWT 인증 필수

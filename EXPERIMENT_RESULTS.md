@@ -455,3 +455,30 @@ redo 지표는 MP MySQL에서 instrument 2개(`log_files_mutex`, `log_writer_mut
 
 - 인기 마켓 실제 처리 용량 약 27건/s. 초과 시 Market 전체 정지(run 1).
 - MP 30초 정지 → 해제 후 1분 이상 Market 전체 저하(run 4). 포기한 차감 요청 대부분을 MP가 나중에 처리.
+
+## ⑳ 예측 참여 차감 서킷 브레이커 before/after (SPEND_CIRCUIT_BREAKER.md §5)
+
+실행일: 2026-10-04 / 커밋 0691c1a / MP 30초 정지 / 설정마다 앱 재기동 후 1회 / 원본: `reports/bench/resilience/11~16-*`
+
+| 설정 (25/s) | 장애 중 톰캣 스레드 | 해제 직후 probe p95 최대 | 포기했는데 MP가 차감 | 503 |
+|---|---|---|---|---|
+| A 서킷 끔, readTimeout 5초 | 128~131 | 2.5초 (회복 약 35초) | 744 | 0 |
+| **B 서킷 켬, 2초** | **2~6** (OPEN 후) | **14ms** | **163** | 763 |
+| C 서킷 켬, 5초 | 6 (OPEN 후) | 92ms | 194 | 764 |
+| D 서킷 끔, 2초 | 52~56 | 1.0초 (회복 약 10초) | 846 | 0 |
+
+15/s: A 416 → B 105, 해제 직후 probe 1.2초 → 15ms. 효과는 대부분 서킷, 2초는 감지를 앞당긴다.
+문제: 재기동 직후(0~10초) 데워지기 전 느린 차감으로 장애 없이 OPEN(503 134건).
+
+## ㉑ 서킷 콜드 스타트 오작동 원인과 MP 워밍업 (SPEND_CIRCUIT_BREAKER.md §6)
+
+실행일: 2026-10-04 / 25/s, 장애 없음, 한쪽만 재기동 / 원본: `reports/bench/resilience/21~25-*`, `mp-classload.log`, `mp-readiness-timeline.txt`
+
+| 조건 | 시작 0~10초 서킷 거절 | 첫 5초 probe p95 |
+|---|---|---|
+| Market만 재기동 | 0 | 412ms |
+| MP만 재기동 | 128 | 488ms |
+| **MP만 재기동 + 워밍업·readiness** | **0** | **57ms** |
+
+- 원인: 콜드 MP가 첫 트래픽 3초 동안 클래스 2,462개(Spring Data·Hibernate·Web·Security·Jackson) 로딩 → 차감 1초 초과 → 느린 호출로 서킷 OPEN.
+- 워밍업(금액 0 차감 HTTP 200회 + 롤백 전용 실제 차감 100회, 약 6초) 동안 readiness 503 OUT_OF_SERVICE, 끝나면 UP.

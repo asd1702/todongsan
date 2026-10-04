@@ -5,6 +5,8 @@
 #   ./scripts/bench/settlement/apps.sh start <sync|async> [member_id|market_id]
 #   MP_APP_ARGS="--spring.kafka.consumer.max-poll-records=200" ./scripts/bench/settlement/apps.sh start async   # MP에만 추가 인자
 #   MARKET_APP_ARGS="--spring.kafka.consumer.max-poll-records=500" ./scripts/bench/settlement/apps.sh start async # Market에만 추가 인자
+#   ONLY_MARKET=1 ./scripts/bench/settlement/apps.sh start async  # Market만 재기동 (MP는 떠 있는 그대로, 콜드 스타트 분리 측정)
+#   ONLY_MP=1 ./scripts/bench/settlement/apps.sh start async      # MP만 재기동 (Market은 떠 있는 그대로)
 #   ./scripts/bench/settlement/apps.sh stop
 #   ./scripts/bench/settlement/apps.sh status
 #
@@ -22,8 +24,8 @@ jar_of() { ls "$ROOT/$1/build/libs/"*.jar 2>/dev/null | grep -v -- '-plain' | he
 
 pid_on_port() { netstat -ano 2>/dev/null | awk -v p=":$1" '$2 ~ p"$" && $4 == "LISTENING" {print $5; exit}'; }
 
-stop_apps() {
-  for port in 8080 8082; do
+stop_apps() { # stop_apps [ports...] (기본 8080 8082)
+  for port in ${@:-8080 8082}; do
     local pid
     pid="$(pid_on_port "$port")"
     if [ -n "$pid" ]; then
@@ -55,9 +57,10 @@ case "${1:-}" in
     [ "$mode" = "sync" ] && key="na"   # sync는 Kafka key를 쓰지 않는다
     market_jar="$(jar_of market-service)"; mp_jar="$(jar_of member-point-service)"
     if [ -z "$market_jar" ] || [ -z "$mp_jar" ]; then echo "jar 없음: apps.sh build 먼저" >&2; exit 1; fi
-    stop_apps
+    if [ "${ONLY_MARKET:-}" = 1 ]; then stop_apps 8082; elif [ "${ONLY_MP:-}" = 1 ]; then stop_apps 8080; else stop_apps; fi
     mp_log="$OUT/mp.log"; market_log="$OUT/market.log"
 
+    [ "${ONLY_MARKET:-}" = 1 ] || {
     DB_URL='jdbc:mysql://localhost:3307/memberpoint?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true' \
     DB_USERNAME=memberpoint_user DB_PASSWORD=memberpoint-local-password \
     JWT_SECRET=bench-jwt-secret-must-be-32-chars-long CRYPTO_AES_KEY='bench-aes-key-must-be-32-chars!!' \
@@ -65,12 +68,18 @@ case "${1:-}" in
       nohup java -jar "$mp_jar" --spring.jpa.show-sql=false --logging.level.org.hibernate.SQL=WARN \
         --logging.level.com.todongsan.memberpointservice=INFO ${MP_APP_ARGS:-} > "$mp_log" 2>&1 &
     wait_ready "$mp_log" "Started MemberPointServiceApplication" "member-point"
+    # 차감 경로 워밍업(ApplicationRunner)이 끝나야 readiness UP. 로드밸런서·k8s처럼 그 뒤에 트래픽을 보낸다 (SPEND_CIRCUIT_BREAKER.md §6)
+    for _ in $(seq 1 120); do curl -s localhost:8080/actuator/health/readiness | grep -q '"UP"' && break; sleep 0.5; done
+    curl -s localhost:8080/actuator/health/readiness | grep -q '"UP"' || { echo "member-point readiness not UP" >&2; exit 1; }
+    }
 
+    [ "${ONLY_MP:-}" = 1 ] || {
     MARKET_POINT_TRANSPORT_MODE="$mode" MARKET_POINT_REQUEST_KEY="${key/na/member_id}" MARKET_POINT_RESULTS_CONSUMER_ENABLED=true \
     MEMBER_POINT_CLIENT_MODE=http MEMBER_POINT_SERVICE_URL=http://localhost:8080 \
     MARKET_OUTBOX_CLEANUP_SCHEDULER_ENABLED=false MARKET_REPUTATION_UPDATE_SCHEDULER_ENABLED=false \
       nohup java -jar "$market_jar" --market.scheduler.prediction-reconciliation.enabled=false ${MARKET_APP_ARGS:-} > "$market_log" 2>&1 &
     wait_ready "$market_log" "Started MarketServiceApplication" "market"
+    }
 
     printf 'MODE=%s\nKEY=%s\nSTARTED=%s\n' "$mode" "$key" "$(date '+%Y-%m-%dT%H:%M:%S')" > "$STATE"
     cat "$STATE"

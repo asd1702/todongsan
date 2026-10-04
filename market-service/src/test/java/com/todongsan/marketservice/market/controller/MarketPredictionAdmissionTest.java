@@ -1,6 +1,7 @@
 package com.todongsan.marketservice.market.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doAnswer;
@@ -12,7 +13,10 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.todongsan.marketservice.global.exception.CustomException;
+import com.todongsan.marketservice.global.exception.errorcode.CommonErrorCode;
 import com.todongsan.marketservice.market.client.MemberPointClient;
+import com.todongsan.marketservice.market.service.MarketPredictionAdmission;
 import com.todongsan.marketservice.market.client.exception.PointInsufficientException;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import java.time.LocalDate;
@@ -97,6 +101,31 @@ class MarketPredictionAdmissionTest {
 
         // 끝난 요청의 자리는 돌아온다
         predict(HOT_MARKET, 4L).andExpect(jsonPath("$.data.status").value("CONFIRMED"));
+    }
+
+    /** 마켓별 자리가 남아 있어도 전체 자리가 없으면 거절한다. 거절할 때 이미 잡은 마켓별 자리는 돌려준다 (§6) */
+    @Test
+    void 전체_한도를_넘으면_다른_마켓도_거절하고_마켓별_자리는_돌려준다() throws Exception {
+        MarketPredictionAdmission admission = new MarketPredictionAdmission(2, 2);
+        MarketPredictionAdmission.Ticket first = admission.enter(HOT_MARKET);
+        MarketPredictionAdmission.Ticket second = admission.enter(OTHER_MARKET);
+
+        assertThatThrownBy(() -> admission.enter(3L))
+                .isInstanceOfSatisfying(CustomException.class,
+                        e -> assertThat(e.getErrorCode()).isEqualTo(CommonErrorCode.SERVICE_UNAVAILABLE));
+        assertThatThrownBy(() -> admission.enter(HOT_MARKET)).isInstanceOf(CustomException.class);
+
+        first.close();
+        // 전체 거절 때 마켓별 자리를 돌려주지 않았다면 HOT_MARKET 자리는 2개 모두 잡혀 있었을 것이다
+        MarketPredictionAdmission.Ticket third = admission.enter(HOT_MARKET);
+        assertThatThrownBy(() -> admission.enter(HOT_MARKET)).isInstanceOf(CustomException.class);
+        third.close();
+        second.close();
+        // 모두 반환됐다면 HOT_MARKET 자리 2개를 동시에 잡을 수 있다 (새는 자리가 하나라도 있으면 두 번째가 거절된다)
+        MarketPredictionAdmission.Ticket a = admission.enter(HOT_MARKET);
+        MarketPredictionAdmission.Ticket b = admission.enter(HOT_MARKET);
+        a.close();
+        b.close();
     }
 
     @Test

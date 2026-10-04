@@ -48,6 +48,10 @@ mybatis:
     map-underscore-to-camel-case: true
 
 market:
+  prediction:
+    admission:
+      # 마켓별 동시 진행 예측 수 한도. 넘치면 즉시 503 SERVICE_UNAVAILABLE. 0이면 제한 없음 (docs/architecture/HOT_MARKET_ADMISSION.md §4: 8이 보호와 처리량의 균형)
+      max-in-flight-per-market: ${MARKET_PREDICTION_MAX_IN_FLIGHT_PER_MARKET:8}
   member-point:
     # 예측 참여 차감 서킷 브레이커. 끄면 기존 동작 (before/after 측정, 롤백용. 설정은 아래 resilience4j.circuitbreaker.instances.memberPointSpend)
     spend-circuit-breaker-enabled: ${MARKET_SPEND_CIRCUIT_BREAKER_ENABLED:true}

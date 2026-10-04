@@ -14,6 +14,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.todongsan.marketservice.market.client.MemberPointClient;
 import com.todongsan.marketservice.market.client.PointSpendCommand;
+import com.todongsan.marketservice.market.client.exception.MemberPointRejectedException;
 import com.todongsan.marketservice.market.client.exception.MemberPointTimeoutException;
 import com.todongsan.marketservice.market.client.exception.MemberPointUnavailableException;
 import com.todongsan.marketservice.market.client.exception.PointInsufficientException;
@@ -126,6 +127,19 @@ class MarketPredictionSpendCircuitBreakerTest {
 
         for (long member = 1; member <= 6; member++) {
             predict(MARKET_ID, member).andExpect(jsonPath("$.errorCode").value("POINT_INSUFFICIENT"));
+        }
+
+        assertThat(circuitBreaker.getState()).isEqualTo(CircuitBreaker.State.CLOSED);
+        verify(memberPointClient, times(6)).spend(any());
+    }
+
+    /** MP의 4xx 업무 오류(키 충돌 등)는 MP가 정상 응답한 것이다. 데이터 문제 하나로 전체 예측이 막히면 안 된다 (B4 정정) */
+    @Test
+    void businessRejectionsDoNotOpenCircuit() throws Exception {
+        doThrow(new MemberPointRejectedException("IDEMPOTENCY_KEY_CONFLICT")).when(memberPointClient).spend(any());
+
+        for (long member = 1; member <= 6; member++) {
+            predict(MARKET_ID, member).andExpect(jsonPath("$.data.status").value("POINT_UNKNOWN"));
         }
 
         assertThat(circuitBreaker.getState()).isEqualTo(CircuitBreaker.State.CLOSED);

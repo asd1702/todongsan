@@ -110,3 +110,14 @@ before(A)도 같은 구간 probe가 1.3초까지 느렸으므로 실제로 느�
 
 검증: `SpendPathWarmupTest`(워밍업이 실제 차감을 실행하지만 잔액·이력이 남지 않음, readiness가 인증 없이 UP). 변형 검사 3개(롤백 제거, HTTP 금액 0 → 1, 프로브 허용 제거) 모두 잡힘.
 운영에서는 로드밸런서 slow start(AWS ALB `slow_start`, Envoy)를 함께 쓰면 워밍업이 못 데운 경로(JIT 최적화 등)까지 완화된다.
+
+## 7. B4 정정: MP의 4xx 업무 오류는 실패로 세지 않는다
+
+입장 제한 실험 준비 중(HOT_MARKET_ADMISSION.md §3) 같은 run 번호를 다시 써서 MP에 남은 멱등성 키와 충돌했다(`IDEMPOTENCY_KEY_CONFLICT`).
+Market은 잔액 부족을 뺀 MP 업무 오류(4xx)를 모두 `MemberPointExternalException`(결과 불명)으로 바꾸고, 서킷은 이를 실패로 셌다 →
+**데이터 문제 하나로 서킷이 열려 모든 마켓의 예측이 503**이 됐다(시작 0~60초 내내 OPEN, 다른 마켓도 거절).
+4xx는 MP가 정상 응답한 것이다. 운영에서도 클라이언트 버그·데이터 문제로 4xx가 몰리면 같은 일이 생긴다.
+
+- `MemberPointRejectedException extends MemberPointExternalException`: HTTP 4xx, 또는 성공 아님 + errorCode 응답. 예측 처리는 그대로(UNKNOWN → 대사).
+- 서킷은 이 타입을 `responded`(성공)로 센다. 실패로 세는 것은 타임아웃·연결 실패·503·5xx·디코딩 실패·errorCode 없는 응답.
+- 검증: `businessRejectionsDoNotOpenCircuit`, `spendMaps4xxToRejectedAnd5xxToExternal`. 변형 검사 2개(4xx도 실패로 셈, 4xx를 External로) 모두 잡힘.

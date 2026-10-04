@@ -13,6 +13,7 @@ import com.todongsan.marketservice.market.client.MemberPointTransactionStatus;
 import com.todongsan.marketservice.market.client.MemberPointTransactionStatusResponse;
 import com.todongsan.marketservice.market.client.PointSpendCommand;
 import com.todongsan.marketservice.market.client.exception.MemberPointExternalException;
+import com.todongsan.marketservice.market.client.exception.MemberPointRejectedException;
 import com.todongsan.marketservice.market.client.exception.MemberPointTimeoutException;
 import com.todongsan.marketservice.market.client.exception.MemberPointUnavailableException;
 import com.todongsan.marketservice.market.client.exception.PointInsufficientException;
@@ -166,6 +167,9 @@ public class HttpMemberPointClient implements MemberPointClient {
         if (e.status() == 503) {
             return new MemberPointUnavailableException(failureMessage(e, "MEMBER_POINT_UNAVAILABLE"));
         }
+        if (e.status() >= 400 && e.status() < 500) {
+            return new MemberPointRejectedException(errorCode == null ? failureMessage(e, MEMBER_POINT_RESULT_UNKNOWN) : errorCode);
+        }
         return new MemberPointExternalException(errorCode == null ? failureMessage(e, MEMBER_POINT_RESULT_UNKNOWN) : errorCode);
     }
 
@@ -173,7 +177,10 @@ public class HttpMemberPointClient implements MemberPointClient {
         if (POINT_INSUFFICIENT.equals(errorCode)) {
             return new PointInsufficientException(errorCode);
         }
-        return new MemberPointExternalException(failureMessage(message, errorCode, MEMBER_POINT_RESULT_UNKNOWN));
+        // 성공 아님 + errorCode: MP가 업무 오류로 응답했다
+        return errorCode == null
+                ? new MemberPointExternalException(failureMessage(message, errorCode, MEMBER_POINT_RESULT_UNKNOWN))
+                : new MemberPointRejectedException(failureMessage(message, errorCode, MEMBER_POINT_RESULT_UNKNOWN));
     }
 
     private String extractErrorCode(String body) {

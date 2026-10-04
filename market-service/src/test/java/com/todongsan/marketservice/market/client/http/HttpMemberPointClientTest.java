@@ -10,6 +10,7 @@ import com.todongsan.marketservice.market.client.MemberPointSettlementItem;
 import com.todongsan.marketservice.market.client.MemberPointTransactionStatus;
 import com.todongsan.marketservice.market.client.PointSpendCommand;
 import com.todongsan.marketservice.market.client.exception.MemberPointExternalException;
+import com.todongsan.marketservice.market.client.exception.MemberPointRejectedException;
 import com.todongsan.marketservice.market.client.exception.PointInsufficientException;
 import java.math.BigDecimal;
 import java.util.List;
@@ -68,8 +69,33 @@ class HttpMemberPointClientTest {
         HttpMemberPointClient client = new HttpMemberPointClient(feignClient, 3000, 2000);
 
         assertThatThrownBy(() -> client.spend(spendCommand()))
-                .isInstanceOf(MemberPointExternalException.class)
+                // 업무 오류 응답: 결과 불명(External)으로 다루되 서킷은 세지 않는 하위 타입 (SPEND_CIRCUIT_BREAKER.md B4 정정)
+                .isInstanceOf(MemberPointRejectedException.class)
                 .hasMessage("동일 키 요청 내용이 다릅니다.");
+    }
+
+    /** HTTP 4xx는 MP가 업무 오류로 응답한 것(서킷 미집계), 5xx는 결과 불명(서킷 집계) (SPEND_CIRCUIT_BREAKER.md B4 정정) */
+    @Test
+    void spendMaps4xxToRejectedAnd5xxToExternal() {
+        CapturingFeignClient feignClient = new CapturingFeignClient();
+        HttpMemberPointClient client = new HttpMemberPointClient(feignClient, 3000, 2000);
+
+        feignClient.spendFailure = feignError(409, "{\"success\":false,\"errorCode\":\"IDEMPOTENCY_KEY_CONFLICT\"}");
+        assertThatThrownBy(() -> client.spend(spendCommand()))
+                .isInstanceOf(MemberPointRejectedException.class)
+                .hasMessage("IDEMPOTENCY_KEY_CONFLICT");
+
+        feignClient.spendFailure = feignError(500, "{\"success\":false,\"errorCode\":\"INTERNAL_ERROR\"}");
+        assertThatThrownBy(() -> client.spend(spendCommand()))
+                .isExactlyInstanceOf(MemberPointExternalException.class);
+    }
+
+    private static feign.FeignException feignError(int status, String body) {
+        feign.Request request = feign.Request.create(feign.Request.HttpMethod.POST, "/internal/api/v1/points/spend",
+                java.util.Map.of(), null, java.nio.charset.StandardCharsets.UTF_8, null);
+        feign.Response response = feign.Response.builder().status(status).reason("test").request(request)
+                .headers(java.util.Map.of()).body(body, java.nio.charset.StandardCharsets.UTF_8).build();
+        return feign.FeignException.errorStatus("spend", response);
     }
 
     @Test
@@ -228,6 +254,7 @@ class HttpMemberPointClientTest {
         private MemberPointHttpDtos.SettlementBatchRequest settlementRequest;
         private MemberPointHttpDtos.RefundBatchRequest refundRequest;
         private MemberPointApiResponse<MemberPointHttpDtos.SpendResponse> spendResponse;
+        private RuntimeException spendFailure;
         private MemberPointApiResponse<MemberPointHttpDtos.TransactionStatusResponse> transactionResponse;
         private MemberPointApiResponse<MemberPointHttpDtos.SettlementBatchResponse> settlementResponse;
         private MemberPointApiResponse<MemberPointHttpDtos.RefundBatchResponse> refundResponse;
@@ -243,6 +270,9 @@ class HttpMemberPointClientTest {
             this.idempotencyKey = idempotencyKey;
             this.memberIdHeader = memberId;
             this.spendRequest = request;
+            if (spendFailure != null) {
+                throw spendFailure;
+            }
             return spendResponse;
         }
 

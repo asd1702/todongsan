@@ -22,7 +22,7 @@ public class StallAnalyze {
                     tag(tags, "name"), tag(tags, "status")));
         }
         long t0 = pts.stream().mapToLong(Pt::t).min().orElseThrow();
-        int W = 5000;
+        final int W = 5000;
         TreeMap<Integer, Map<String, List<Double>>> lat = new TreeMap<>();
         TreeMap<Integer, Map<String, int[]>> fail = new TreeMap<>();
         TreeMap<Integer, Map<String, Integer>> status = new TreeMap<>();
@@ -31,7 +31,8 @@ public class StallAnalyze {
             switch (p.metric()) {
                 case "http_req_duration" -> lat.computeIfAbsent(w, k -> new HashMap<>()).computeIfAbsent(p.name(), k -> new ArrayList<>()).add(p.v());
                 case "http_req_failed" -> { int[] c = fail.computeIfAbsent(w, k -> new HashMap<>()).computeIfAbsent(p.name(), k -> new int[2]); c[0]++; c[1] += (int) p.v(); }
-                case "predict_outcome" -> status.computeIfAbsent(w, k -> new TreeMap<>()).merge(p.status(), 1, Integer::sum);
+                case "predict_outcome" -> status.computeIfAbsent(w, k -> new TreeMap<>())
+                        .merge(("other".equals(p.name()) ? "other:" : "") + p.status(), 1, Integer::sum);
                 default -> {}
             }
         }
@@ -55,6 +56,33 @@ public class StallAnalyze {
         Map<String, Integer> total = new TreeMap<>();
         status.values().forEach(m -> m.forEach((k, v) -> total.merge(k, v, Integer::sum)));
         System.out.println("예측 결과 합계: " + total);
+
+        // 정상 구간 요약 (재기동 직후 10초 제외, HOT_MARKET_ADMISSION.md §3): 인기 마켓 처리량·거절, 조회·다른 마켓 지연, 커넥션 대기
+        int from = 2;
+        List<Double> probe = new ArrayList<>(), other = new ArrayList<>(), hot = new ArrayList<>();
+        int confirmed = 0, rejected = 0, otherFailed = 0, windows = 0, maxPending = 0;
+        for (int w : lat.tailMap(from).keySet()) {
+            windows++;
+            probe.addAll(lat.get(w).getOrDefault("probe", List.of()));
+            other.addAll(lat.get(w).getOrDefault("other", List.of()));
+            hot.addAll(lat.get(w).getOrDefault("predict", List.of()));
+            Map<String, Integer> s = status.getOrDefault(w, Map.of());
+            confirmed += s.getOrDefault("CONFIRMED", 0);
+            rejected += s.getOrDefault("SERVICE_UNAVAILABLE", 0);
+            otherFailed += s.entrySet().stream().filter(e -> e.getKey().startsWith("other:") && !e.getKey().equals("other:CONFIRMED"))
+                    .mapToInt(Map.Entry::getValue).sum();
+            maxPending = Math.max(maxPending, pending.getOrDefault(w, 0));
+        }
+        // ASCII만 쓴다: 단일 파일 실행(java X.java)은 소스를 시스템 기본 인코딩으로 읽어 한글 리터럴이 깨진다 (sweep이 이 줄을 grep한다)
+        System.out.printf("SUMMARY(from %ds): hot_confirmed=%.1f/s rejected=%d hot_p95=%s | probe_p95=%s probe_max=%s | other_p95=%s other_max=%s other_failed=%d | db_pending_max=%d%n",
+                from * 5, confirmed / (windows * 5.0), rejected, pct(hot, 0.95), pct(probe, 0.95), pct(probe, 1.0),
+                pct(other, 0.95), pct(other, 1.0), otherFailed, maxPending);
+    }
+
+    static String pct(List<Double> v, double q) {
+        if (v.isEmpty()) return "-";
+        List<Double> s = new ArrayList<>(v); Collections.sort(s);
+        return String.format("%.0fms", s.get(Math.min(s.size() - 1, (int) Math.ceil(s.size() * q) - 1)));
     }
 
     static String stat(List<Double> v, int[] f, boolean withMax) {

@@ -8,6 +8,7 @@ import com.todongsan.marketservice.market.client.MemberPointClient;
 import com.todongsan.marketservice.market.client.MemberPointSpendCircuitBreaker;
 import com.todongsan.marketservice.market.client.PointSpendCommand;
 import com.todongsan.marketservice.market.client.exception.MemberPointExternalException;
+import com.todongsan.marketservice.market.client.exception.MemberPointRejectedException;
 import com.todongsan.marketservice.market.client.exception.MemberPointTimeoutException;
 import com.todongsan.marketservice.market.client.exception.MemberPointUnavailableException;
 import com.todongsan.marketservice.market.client.exception.PointInsufficientException;
@@ -32,6 +33,7 @@ public class MarketPredictionService {
     private final MemberPointClient memberPointClient;
     private final MarketPredictionDeadlockDebug deadlockDebug;
     private final MemberPointSpendCircuitBreaker spendCircuitBreaker;
+    private final MarketPredictionAdmission admission;
 
     public CreatePredictionResponse createPrediction(
             long marketId,
@@ -41,8 +43,10 @@ public class MarketPredictionService {
     ) {
         validateHeaders(marketId, memberId, idempotencyKey);
 
-        // 예측 생성 전에 서킷 허가를 받는다. MP가 아프면 DB를 건드리지 않고 503 (SPEND_CIRCUIT_BREAKER.md B2·B3)
-        try (MemberPointSpendCircuitBreaker.Permit permit = spendCircuitBreaker.acquire()) {
+        // 예측 생성 전에 마켓별 입장 자리(HOT_MARKET_ADMISSION.md A3)와 서킷 허가(SPEND_CIRCUIT_BREAKER.md B2)를 받는다.
+        // 둘 다 거절이면 DB를 건드리지 않고 503. 서킷 허가가 거절되면 입장 자리는 자동으로 돌려준다
+        try (MarketPredictionAdmission.Ticket ticket = admission.enter(marketId);
+             MemberPointSpendCircuitBreaker.Permit permit = spendCircuitBreaker.acquire()) {
             MarketPrediction prediction;
             try {
                 prediction = transactionService.createPendingPrediction(
@@ -72,7 +76,12 @@ public class MarketPredictionService {
                 transactionService.markPredictionFailed(prediction.getId(), failureReason(e, "POINT_INSUFFICIENT"));
                 throw new CustomException(PointErrorCode.POINT_INSUFFICIENT);
             } catch (MemberPointTimeoutException | MemberPointUnavailableException | MemberPointExternalException e) {
-                permit.failed(e);
+                // MP가 4xx로 응답했다면 MP는 정상이다. 서킷은 실패로 세지 않는다 (예측은 그대로 UNKNOWN → 대사)
+                if (e instanceof MemberPointRejectedException) {
+                    permit.responded();
+                } else {
+                    permit.failed(e);
+                }
                 return toResponse(transactionService.markPredictionUnknown(
                         prediction.getId(),
                         failureReason(e, "MEMBER_POINT_STATUS_UNKNOWN")

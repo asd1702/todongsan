@@ -22,18 +22,19 @@ import com.todongsan.marketservice.market.client.http.MemberPointHttpDtos.Settle
 import com.todongsan.marketservice.market.client.http.MemberPointHttpDtos.SettlementItemResult;
 import com.todongsan.marketservice.market.client.http.MemberPointHttpDtos.TransactionStatusResponse;
 import feign.FeignException;
+import feign.Request;
 import feign.RetryableException;
 import feign.codec.DecodeException;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 @Component
-@RequiredArgsConstructor
 @ConditionalOnProperty(
         name = "client.member-point.mode",
         havingValue = "http"
@@ -46,10 +47,23 @@ public class HttpMemberPointClient implements MemberPointClient {
     private static final Pattern ERROR_CODE_PATTERN = Pattern.compile("\"errorCode\"\\s*:\\s*\"([^\"]+)\"");
 
     private final MemberPointInternalFeignClient feignClient;
+    /** 차감만 readTimeout을 짧게 (SPEND_CIRCUIT_BREAKER.md B7). 연결 타임아웃은 다른 호출과 같다 */
+    private final Request.Options spendOptions;
+
+    public HttpMemberPointClient(
+            MemberPointInternalFeignClient feignClient,
+            @Value("${client.member-point.connect-timeout-millis:3000}") long connectTimeoutMillis,
+            @Value("${client.member-point.spend-read-timeout-millis:2000}") long spendReadTimeoutMillis
+    ) {
+        this.feignClient = feignClient;
+        this.spendOptions = new Request.Options(
+                connectTimeoutMillis, TimeUnit.MILLISECONDS, spendReadTimeoutMillis, TimeUnit.MILLISECONDS, true);
+    }
 
     @Override
     public void spend(PointSpendCommand command) {
         MemberPointApiResponse<MemberPointHttpDtos.SpendResponse> response = call(() -> feignClient.spend(
+                spendOptions,
                 command.idempotencyKey(),
                 command.memberId(),
                 MemberPointHttpDtos.SpendRequest.from(command, SPEND_REASON)

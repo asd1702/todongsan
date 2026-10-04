@@ -36,6 +36,8 @@ client:
     base-url: ${MEMBER_POINT_SERVICE_URL:http://localhost:8080}
     connect-timeout-millis: ${MEMBER_POINT_CONNECT_TIMEOUT_MILLIS:3000}
     read-timeout-millis: ${MEMBER_POINT_READ_TIMEOUT_MILLIS:5000}
+    # 예측 참여 차감만 따로 짧게. 서킷 브레이커는 호출이 끝나야 실패를 세므로 감지 시간·스레드 점유가 이 값에 비례한다 (docs/architecture/SPEND_CIRCUIT_BREAKER.md B7)
+    spend-read-timeout-millis: ${MEMBER_POINT_SPEND_READ_TIMEOUT_MILLIS:2000}
   insight:
     mode: ${INSIGHT_CLIENT_MODE:fake}
     base-url: ${INSIGHT_SERVICE_URL:http://localhost:8083}
@@ -46,6 +48,9 @@ mybatis:
     map-underscore-to-camel-case: true
 
 market:
+  member-point:
+    # 예측 참여 차감 서킷 브레이커. 끄면 기존 동작 (before/after 측정, 롤백용. 설정은 아래 resilience4j.circuitbreaker.instances.memberPointSpend)
+    spend-circuit-breaker-enabled: ${MARKET_SPEND_CIRCUIT_BREAKER_ENABLED:true}
   point-transport:
     # sync: Feign 배치 호출 / async: outbox + Debezium CDC (현재 환불만 적용, docs/architecture/ASYNC_POINT_FLOW.md)
     mode: ${MARKET_POINT_TRANSPORT_MODE:sync}
@@ -89,3 +94,18 @@ market:
       enabled: ${MARKET_REPUTATION_UPDATE_SCHEDULER_ENABLED:true}
       fixed-delay-ms: ${MARKET_REPUTATION_UPDATE_SCHEDULER_FIXED_DELAY_MS:180000}
       limit: ${MARKET_REPUTATION_UPDATE_SCHEDULER_LIMIT:50}
+
+# 예측 참여 차감(Market → Member-Point spend) 서킷 브레이커 (docs/architecture/SPEND_CIRCUIT_BREAKER.md §2)
+# 실패: 타임아웃·5xx·연결 실패·결과 불명 + 1초 넘는 호출. 잔액 부족 등 업무 실패는 성공으로 센다
+resilience4j:
+  circuitbreaker:
+    instances:
+      memberPointSpend:
+        sliding-window-type: TIME_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 20
+        failure-rate-threshold: 50
+        slow-call-duration-threshold: 1s
+        slow-call-rate-threshold: 50
+        wait-duration-in-open-state: 5s
+        permitted-number-of-calls-in-half-open-state: 5

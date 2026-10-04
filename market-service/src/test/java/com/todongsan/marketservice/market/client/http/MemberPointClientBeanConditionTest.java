@@ -49,6 +49,7 @@ class MemberPointClientBeanConditionTest {
 
         @Override
         public MemberPointApiResponse<MemberPointHttpDtos.SpendResponse> spend(
+                feign.Request.Options options,
                 String idempotencyKey,
                 Long memberId,
                 MemberPointHttpDtos.SpendRequest request

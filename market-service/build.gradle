@@ -33,6 +33,9 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.cloud:spring-cloud-starter-openfeign'
+    // 예측 참여 차감 서킷 브레이커 (docs/architecture/SPEND_CIRCUIT_BREAKER.md). 버전은 Spring Cloud BOM(2.2.x)에 맡긴다. 지정하면 spring6 모듈과 버전이 섞인다
+    implementation 'io.github.resilience4j:resilience4j-spring-boot3'
+    implementation 'io.github.resilience4j:resilience4j-micrometer'
     implementation 'org.springframework.kafka:spring-kafka'
     implementation 'org.mybatis.spring.boot:mybatis-spring-boot-starter:3.0.5'
     implementation 'org.flywaydb:flyway-core'

@@ -828,7 +828,7 @@ public enum MarketErrorCode implements ErrorCode {
 | `IDEMPOTENCY_KEY_REQUIRED` | 포인트 차감/정산/환불 API 호출 시 멱등성 키 누락 |
 | `IDEMPOTENCY_KEY_CONFLICT` | 동일 멱등성 키로 다른 요청 발생 |
 | `EXTERNAL_SERVICE_TIMEOUT` | Member-Point 또는 외부 데이터 API 타임아웃 |
-| `EXTERNAL_SERVICE_UNAVAILABLE` | Member-Point 또는 외부 데이터 API 연결 실패 |
+| `EXTERNAL_SERVICE_UNAVAILABLE` | Member-Point 또는 외부 데이터 API 연결 실패. 예측 참여에서는 Member-Point 차감 서킷 브레이커가 열려 있을 때(503). 이때 예측 row를 만들지 않고 MP도 호출하지 않으므로 같은 멱등성 키로 다시 시도할 수 있다 (docs/architecture/SPEND_CIRCUIT_BREAKER.md) |
 | `EXTERNAL_SERVICE_ERROR` | 상대 서비스 5xx 응답 |
 | `DATABASE_ERROR` | DB 처리 실패 |
 | `INTERNAL_ERROR` | 예상하지 못한 서버 내부 오류 |

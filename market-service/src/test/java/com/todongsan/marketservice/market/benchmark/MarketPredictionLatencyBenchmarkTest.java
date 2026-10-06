@@ -119,7 +119,8 @@ import org.springframework.test.context.ActiveProfiles;
                 "todongsan.benchmark.deadlock-debug.enabled=${bench.deadlockDebug:false}",
                 // 경합 측정이 목적이라 입장 제한은 기본으로 끈다 (이전 결과 ⑰과 같은 조건, HOT_MARKET_ADMISSION.md)
                 "market.prediction.admission.max-in-flight-per-market=${bench.admissionLimit:0}",
-                "market.prediction.admission.max-in-flight-total=${bench.admissionTotal:0}"
+                "market.prediction.admission.max-in-flight-total=${bench.admissionTotal:0}",
+                "market.prediction.batch-confirm.enabled=${bench.batchConfirm:false}"
         }
 )
 @ActiveProfiles("mysqlit")

@@ -902,6 +902,35 @@
         FOR UPDATE
     </select>
 
+    <select id="lockPredictionsByIdsInOrder" resultType="com.todongsan.marketservice.market.entity.MarketPrediction">
+        SELECT *
+        FROM market_prediction
+        WHERE id IN
+        <foreach collection="predictionIds" item="predictionId" open="(" separator="," close=")">
+            #{predictionId}
+        </foreach>
+        ORDER BY id ASC
+        FOR UPDATE
+    </select>
+
+    <!-- CASE로 건마다 다른 값을 쓴다 (H2·MySQL 모두 지원). 상태 조건은 updatePredictionConfirmed와 같다 -->
+    <update id="updatePredictionsConfirmed">
+        UPDATE market_prediction
+        SET price_snapshot = CASE id
+                <foreach collection="rows" item="row">WHEN #{row.predictionId} THEN #{row.priceSnapshot} </foreach>
+            END,
+            contract_quantity = CASE id
+                <foreach collection="rows" item="row">WHEN #{row.predictionId} THEN #{row.contractQuantity} </foreach>
+            END,
+            status = 'CONFIRMED',
+            updated_at = #{updatedAt}
+        WHERE id IN
+        <foreach collection="rows" item="row" open="(" separator="," close=")">
+            #{row.predictionId}
+        </foreach>
+          AND status = 'POINT_PENDING'
+    </update>
+
     <select id="selectPredictionsForSpendReconciliation" resultType="com.todongsan.marketservice.market.entity.MarketPrediction">
         SELECT *
         FROM market_prediction

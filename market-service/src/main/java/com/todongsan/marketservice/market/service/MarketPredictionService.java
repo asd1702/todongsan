@@ -34,6 +34,7 @@ public class MarketPredictionService {
     private final MarketPredictionDeadlockDebug deadlockDebug;
     private final MemberPointSpendCircuitBreaker spendCircuitBreaker;
     private final MarketPredictionAdmission admission;
+    private final PredictionConfirmBatcher confirmBatcher;
 
     public CreatePredictionResponse createPrediction(
             long marketId,
@@ -87,7 +88,8 @@ public class MarketPredictionService {
                         failureReason(e, "MEMBER_POINT_STATUS_UNKNOWN")
                 ));
             }
-            return transactionService.confirmPrediction(prediction.getId());
+            // 같은 마켓 확정을 묶어 잠금·commit을 나눠 쓴다 (PREDICTION_BATCH_CONFIRM.md). 결과는 건별 확정과 같다
+            return confirmBatcher.confirm(marketId, prediction.getId());
         }
     }
 

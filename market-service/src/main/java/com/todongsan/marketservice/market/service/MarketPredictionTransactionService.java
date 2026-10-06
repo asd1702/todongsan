@@ -11,6 +11,7 @@ import com.todongsan.marketservice.market.entity.Market;
 import com.todongsan.marketservice.market.entity.MarketOption;
 import com.todongsan.marketservice.market.entity.MarketPrediction;
 import com.todongsan.marketservice.market.entity.MarketPriceHistory;
+import com.todongsan.marketservice.market.repository.ConfirmedPredictionRow;
 import com.todongsan.marketservice.market.repository.MarketMapper;
 import com.todongsan.marketservice.market.type.MarketStatus;
 import com.todongsan.marketservice.market.type.PredictionStatus;
@@ -18,6 +19,7 @@ import com.todongsan.marketservice.market.type.PriceHistoryEventType;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -105,6 +107,90 @@ public class MarketPredictionTransactionService {
 
     private String pointSpendIdempotencyKey(String idempotencyKey, int attemptNo) {
         return "%s:attempt:%d".formatted(idempotencyKey, attemptNo);
+    }
+
+    /**
+     * 같은 마켓의 예측 여러 건을 트랜잭션 1개로 확정한다 (PREDICTION_BATCH_CONFIRM.md P4·P5).
+     * 마켓·선택지·예측을 한 번씩 잠그고, 받은 순서대로 건별 확정(confirmPrediction)과 같은 규칙을 메모리에서 적용한 뒤
+     * 최종 상태만 기록하고 commit 1번. 결과는 입력 순서대로, 건마다 응답 또는 건별 경로가 던졌을 예외다.
+     * 확정하지 못한 건은 쓰지 않는다. 기록 건수가 맞지 않으면 예외로 전체를 롤백한다 (호출자가 건별로 다시 처리, P6).
+     */
+    @Transactional
+    public List<ConfirmOutcome> confirmPredictionsInBatch(long marketId, List<Long> predictionIds) {
+        List<ConfirmOutcome> outcomes = new ArrayList<>(predictionIds.size());
+        Market market = marketMapper.lockMarketById(marketId);
+        if (market == null || market.getStatus() != MarketStatus.ACTIVE) {
+            CustomException failure = market == null
+                    ? new CustomException(MarketErrorCode.MARKET_NOT_FOUND)
+                    : priceUpdateConflict();
+            predictionIds.forEach(id -> outcomes.add(ConfirmOutcome.failed(failure)));
+            return outcomes;
+        }
+        List<MarketOption> options = marketMapper.lockOptionsByMarketId(marketId);
+        Map<Long, MarketPrediction> predictions = marketMapper.lockPredictionsByIdsInOrder(
+                        predictionIds.stream().distinct().sorted().toList()).stream()
+                .collect(Collectors.toMap(MarketPrediction::getId, prediction -> prediction));
+
+        LocalDateTime now = LocalDateTime.now();
+        BigDecimal totalAmount = BigDecimal.ZERO;
+        List<MarketPriceHistory> histories = new ArrayList<>();
+        List<ConfirmedPredictionRow> rows = new ArrayList<>();
+        for (Long predictionId : predictionIds) {
+            MarketPrediction prediction = predictions.get(predictionId);
+            if (prediction == null
+                    || hasMissingReconciliationData(prediction)
+                    || prediction.getMarketId() != marketId
+                    || prediction.getStatus() != PredictionStatus.POINT_PENDING) {
+                outcomes.add(ConfirmOutcome.failed(priceUpdateConflict()));
+                continue;
+            }
+            AppliedConfirmation applied = applyConfirmation(options, prediction, now);
+            if (applied.rejection() != null) {
+                outcomes.add(ConfirmOutcome.failed(applied.rejection() == ConfirmRejection.OPTION_NOT_FOUND
+                        ? new CustomException(MarketErrorCode.MARKET_OPTION_NOT_FOUND)
+                        : priceUpdateConflict()));
+                continue;
+            }
+            // 같은 예측이 묶음에 두 번 오면 두 번째는 건별 경로처럼 이미 확정된 것으로 본다
+            prediction.setStatus(PredictionStatus.CONFIRMED);
+            totalAmount = totalAmount.add(prediction.getPointAmount());
+            histories.addAll(applied.histories());
+            rows.add(new ConfirmedPredictionRow(predictionId, applied.priceSnapshot(), applied.contractQuantity()));
+            outcomes.add(ConfirmOutcome.confirmed(new CreatePredictionResponse(
+                    predictionId,
+                    marketId,
+                    applied.selectedOption().getId(),
+                    prediction.getPointAmount(),
+                    applied.priceSnapshot(),
+                    applied.contractQuantity(),
+                    PredictionStatus.CONFIRMED
+            )));
+        }
+
+        if (!rows.isEmpty()) {
+            marketMapper.updateMarketTotalPool(marketId, totalAmount, now);
+            for (MarketOption option : options) {
+                marketMapper.updateMarketOptionPoolsAndPrice(option);
+            }
+            marketMapper.insertPriceHistoryRows(histories);
+            int updated = marketMapper.updatePredictionsConfirmed(rows, now);
+            if (updated != rows.size()) {
+                throw new IllegalStateException("Batch confirm updated " + updated + " of " + rows.size() + " predictions");
+            }
+        }
+        return outcomes;
+    }
+
+    /** 묶음 확정의 건별 결과: 응답 또는 건별 경로가 던졌을 예외 */
+    public record ConfirmOutcome(CreatePredictionResponse response, RuntimeException failure) {
+
+        static ConfirmOutcome confirmed(CreatePredictionResponse response) {
+            return new ConfirmOutcome(response, null);
+        }
+
+        static ConfirmOutcome failed(RuntimeException failure) {
+            return new ConfirmOutcome(null, failure);
+        }
     }
 
     @Transactional
@@ -340,43 +426,20 @@ public class MarketPredictionTransactionService {
             return confirmationFailure(skipOnInvalidState);
         }
 
-        MarketOption selectedOption = options.stream()
-                .filter(option -> option.getId().equals(prediction.getOptionId()))
-                .findFirst()
-                .orElse(null);
-        if (selectedOption == null) {
+        LocalDateTime now = LocalDateTime.now();
+        AppliedConfirmation applied = applyConfirmation(options, prediction, now);
+        if (applied.rejection() == ConfirmRejection.OPTION_NOT_FOUND) {
             if (skipOnInvalidState) {
                 return PredictionConfirmationResult.skipped();
             }
             throw new CustomException(MarketErrorCode.MARKET_OPTION_NOT_FOUND);
         }
-        BigDecimal priceSnapshot = selectedOption.getCurrentPrice().setScale(PRICE_SCALE, RoundingMode.HALF_UP);
-        if (priceSnapshot.compareTo(BigDecimal.ZERO) <= 0) {
+        if (applied.rejection() == ConfirmRejection.INVALID) {
             return confirmationFailure(skipOnInvalidState);
         }
-        BigDecimal contractQuantity = prediction.getPointAmount()
-                .divide(priceSnapshot, PRICE_SCALE, RoundingMode.DOWN);
-        LocalDateTime now = LocalDateTime.now();
-
-        Map<Long, OptionSnapshot> snapshots = options.stream()
-                .collect(Collectors.toMap(MarketOption::getId, OptionSnapshot::from));
-        selectedOption.setRealPoolAmount(selectedOption.getRealPoolAmount().add(prediction.getPointAmount()));
-        selectedOption.setTotalContractQuantity(
-                selectedOption.getTotalContractQuantity().add(contractQuantity)
-        );
-        selectedOption.setPredictionCount(selectedOption.getPredictionCount() + 1);
-
-        BigDecimal totalEffectivePool = options.stream()
-                .map(this::effectivePool)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-        if (totalEffectivePool.compareTo(BigDecimal.ZERO) <= 0) {
-            return confirmationFailure(skipOnInvalidState);
-        }
-
-        for (MarketOption option : options) {
-            option.setCurrentPrice(effectivePool(option).divide(totalEffectivePool, PRICE_SCALE, RoundingMode.HALF_UP));
-            option.setUpdatedAt(now);
-        }
+        MarketOption selectedOption = applied.selectedOption();
+        BigDecimal priceSnapshot = applied.priceSnapshot();
+        BigDecimal contractQuantity = applied.contractQuantity();
         deadlockDebug.phase("MARKET_UPDATE_BEFORE", predictionId);
         marketMapper.updateMarketTotalPool(market.getId(), prediction.getPointAmount(), now);
         deadlockDebug.phase("MARKET_UPDATE_AFTER", predictionId);
@@ -384,9 +447,7 @@ public class MarketPredictionTransactionService {
             marketMapper.updateMarketOptionPoolsAndPrice(option);
         }
         deadlockDebug.phase("PRICE_HISTORY_INSERT_BEFORE", predictionId);
-        marketMapper.insertPriceHistoryRows(options.stream()
-                .map(option -> toPriceHistory(predictionId, option, snapshots.get(option.getId()), now))
-                .toList());
+        marketMapper.insertPriceHistoryRows(applied.histories());
         deadlockDebug.phase("PRICE_HISTORY_INSERT_AFTER", predictionId);
 
         deadlockDebug.phase("PREDICTION_CONFIRM_UPDATE_BEFORE", predictionId);
@@ -417,6 +478,67 @@ public class MarketPredictionTransactionService {
                 contractQuantity,
                 PredictionStatus.CONFIRMED
         ));
+    }
+
+    /**
+     * 잠근 선택지들에 예측 1건을 메모리에서 적용한다 (가격 = 유효 풀 / 전체 유효 풀). 건별 확정과 묶음 확정이 같이 쓴다.
+     * 모든 검증을 마친 뒤에만 선택지를 바꾼다. 묶음에서 한 건이 거절돼도 뒤 건의 가격에 흔적이 남지 않게 한다
+     * (PREDICTION_BATCH_CONFIRM.md P4).
+     */
+    private AppliedConfirmation applyConfirmation(List<MarketOption> options, MarketPrediction prediction, LocalDateTime now) {
+        MarketOption selectedOption = options.stream()
+                .filter(option -> option.getId().equals(prediction.getOptionId()))
+                .findFirst()
+                .orElse(null);
+        if (selectedOption == null) {
+            return AppliedConfirmation.rejected(ConfirmRejection.OPTION_NOT_FOUND);
+        }
+        BigDecimal priceSnapshot = selectedOption.getCurrentPrice().setScale(PRICE_SCALE, RoundingMode.HALF_UP);
+        if (priceSnapshot.compareTo(BigDecimal.ZERO) <= 0) {
+            return AppliedConfirmation.rejected(ConfirmRejection.INVALID);
+        }
+        BigDecimal contractQuantity = prediction.getPointAmount()
+                .divide(priceSnapshot, PRICE_SCALE, RoundingMode.DOWN);
+        BigDecimal totalEffectivePool = options.stream()
+                .map(this::effectivePool)
+                .reduce(BigDecimal.ZERO, BigDecimal::add)
+                .add(prediction.getPointAmount());
+        if (totalEffectivePool.compareTo(BigDecimal.ZERO) <= 0) {
+            return AppliedConfirmation.rejected(ConfirmRejection.INVALID);
+        }
+
+        Map<Long, OptionSnapshot> snapshots = options.stream()
+                .collect(Collectors.toMap(MarketOption::getId, OptionSnapshot::from));
+        selectedOption.setRealPoolAmount(selectedOption.getRealPoolAmount().add(prediction.getPointAmount()));
+        selectedOption.setTotalContractQuantity(
+                selectedOption.getTotalContractQuantity().add(contractQuantity)
+        );
+        selectedOption.setPredictionCount(selectedOption.getPredictionCount() + 1);
+        for (MarketOption option : options) {
+            option.setCurrentPrice(effectivePool(option).divide(totalEffectivePool, PRICE_SCALE, RoundingMode.HALF_UP));
+            option.setUpdatedAt(now);
+        }
+        List<MarketPriceHistory> histories = options.stream()
+                .map(option -> toPriceHistory(prediction.getId(), option, snapshots.get(option.getId()), now))
+                .toList();
+        return new AppliedConfirmation(null, selectedOption, priceSnapshot, contractQuantity, histories);
+    }
+
+    private enum ConfirmRejection {
+        OPTION_NOT_FOUND,
+        INVALID
+    }
+
+    private record AppliedConfirmation(
+            ConfirmRejection rejection,
+            MarketOption selectedOption,
+            BigDecimal priceSnapshot,
+            BigDecimal contractQuantity,
+            List<MarketPriceHistory> histories
+    ) {
+        private static AppliedConfirmation rejected(ConfirmRejection rejection) {
+            return new AppliedConfirmation(rejection, null, null, null, List.of());
+        }
     }
 
     private PredictionConfirmationResult confirmationFailure(boolean skipOnInvalidState) {

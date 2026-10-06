@@ -154,6 +154,15 @@ public interface MarketMapper {
 
     MarketPrediction lockPredictionById(@Param("predictionId") long predictionId);
 
+    /** 묶음 확정: 예측들을 ID 오름차순으로 잠근다 (PREDICTION_BATCH_CONFIRM.md P4) */
+    List<MarketPrediction> lockPredictionsByIdsInOrder(@Param("predictionIds") List<Long> predictionIds);
+
+    /** 묶음 확정: 예측 여러 건을 문장 1개로 확정한다. 상태 조건은 updatePredictionConfirmed와 같다 */
+    int updatePredictionsConfirmed(
+            @Param("rows") List<ConfirmedPredictionRow> rows,
+            @Param("updatedAt") LocalDateTime updatedAt
+    );
+
     List<MarketPrediction> selectPredictionsForSpendReconciliation(
             @Param("pendingThreshold") LocalDateTime pendingThreshold,
             @Param("limit") int limit

@@ -46,6 +46,29 @@ public class FakeMemberPointClient implements MemberPointClient {
         );
     }
 
+    /** 기록이 없으면 FAILED(POINT_SPEND_FENCED)로 남기고, 있으면 그대로 돌려준다. */
+    @Override
+    public MemberPointTransactionStatusResponse fenceSpend(PointSpendCommand command) {
+        MemberPointTransactionStatusResponse current = getTransactionStatus(command.idempotencyKey());
+        if (current.status() != MemberPointTransactionStatus.NOT_FOUND) {
+            return current;
+        }
+        MemberPointTransactionStatusResponse fenced = new MemberPointTransactionStatusResponse(
+                command.idempotencyKey(),
+                MemberPointTransactionStatus.FAILED,
+                command.memberId(),
+                command.type(),
+                command.amount(),
+                command.referenceType(),
+                command.referenceId(),
+                null,
+                null,
+                "POINT_SPEND_FENCED"
+        );
+        transactionStatuses.put(command.idempotencyKey(), fenced);
+        return fenced;
+    }
+
     public void setTransactionStatus(String idempotencyKey, MemberPointTransactionStatusResponse response) {
         transactionStatuses.put(idempotencyKey, response);
         transactionStatusExceptions.remove(idempotencyKey);

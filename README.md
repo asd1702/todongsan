@@ -53,9 +53,9 @@
 **사전 준비:** Docker Desktop, JDK 17
 
 ```bash
-# 1. 공용 MySQL 기동 (서비스별 스키마 자동 생성: market/memberpoint/battle/insight)
+# 1. 서비스별 MySQL 기동 (각 컨테이너가 자신의 DB와 전용 계정을 생성)
 cd infra
-docker compose up -d          # todongsan-mysql 컨테이너
+docker compose up -d          # member-point/market/battle/insight MySQL 컨테이너
 
 # 2. 개별 서비스 실행 (예: Market — 8082)
 cd ../market-service
@@ -82,7 +82,7 @@ cd market-service
 ## 설계 원칙 (요약)
 
 - **Battle와 Market 분리** — 참여자가 결과를 직접 바꿀 수 있는 주제(선호 투표)에는 포인트 예측을 허용하지 않고, 외부 데이터로 판정 가능한 주제만 Market에서 운영
-- **DB per service** — 서비스마다 독립 스키마로 결합도를 낮춤
+- **Database per service** — 서비스마다 독립 MySQL 인스턴스·전용 계정·전용 volume을 사용
 - **포인트 정합성** — 포인트 관련 API는 멱등성 키로 중복 지급/차감 방지
 
 자세한 정책(정산 방식, 어뷰징 방어, 엣지케이스 등)은 [docs/PLANNING.md](docs/PLANNING.md)에 정리되어 있습니다.

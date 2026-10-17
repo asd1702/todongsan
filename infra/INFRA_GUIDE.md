@@ -4,7 +4,7 @@
 
 본 문서는 Todongsan 프로젝트의 로컬 개발 환경 구성을 설명한다.
 
-모든 개발자는 동일한 Docker Compose 설정을 사용하여 로컬 MySQL 환경을 구축한다.
+모든 개발자는 동일한 Docker Compose 설정을 사용하여 서비스별 독립 MySQL 환경을 구축한다.
 
 ---
 
@@ -33,13 +33,6 @@ todongsan
 │
 ├── infra
 │   ├── docker-compose.yml
-│   └── mysql
-│       └── init
-│           ├── 00-create-databases.sql
-│           ├── 01-market-schema.sql
-│           ├── 02-memberpoint-schema.sql
-│           ├── 03-battle-schema.sql
-│           └── 04-insight-schema.sql
 │
 ├── market-service
 ├── member-point-service
@@ -72,7 +65,10 @@ docker ps
 정상 실행 시 다음 컨테이너가 표시된다.
 
 ```text
-todongsan-mysql
+member-point-mysql
+market-mysql
+battle-mysql
+insight-mysql
 ```
 
 ---
@@ -92,8 +88,7 @@ docker compose down
 EC2와 통합 로컬 검증 환경에서 MySQL 데이터는 Docker volume에 저장된다.
 
 ```text
-compose volume key: todongsan_mysql_data
-docker compose config output: infra_todongsan_mysql_data
+compose volume name: memberpoint-mysql-data, market-mysql-data, battle-mysql-data, insight-mysql-data
 ```
 
 일반 종료 또는 재기동 시에는 volume을 보존해야 한다.
@@ -123,32 +118,32 @@ docker volume prune
 컨테이너 접속
 
 ```bash
-docker exec -it todongsan-mysql bash
+docker exec -it market-mysql bash
 ```
 
 MySQL 접속
 
 ```bash
-mysql -u root -p
+mysql -u market_user -p market
 ```
 
 비밀번호
 
 ```text
-1234
+market-local-password
 ```
 
 ---
 
 ## 8. 생성되는 Database
 
-초기 실행 시 다음 Database가 자동 생성된다.
+각 컨테이너는 자신의 Database 하나만 자동 생성한다.
 
 ```text
-memberpoint
-battle
-market
-insight
+member-point-mysql → memberpoint
+market-mysql       → market
+battle-mysql       → battle
+insight-mysql      → insight
 ```
 
 확인
@@ -159,36 +154,9 @@ SHOW DATABASES;
 
 ---
 
-## 9. SQL 초기화 스크립트
+## 9. Schema 초기화
 
-초기 SQL 파일 위치
-
-```text
-infra/mysql/init
-```
-
-예시
-
-```text
-00-create-databases.sql
-01-market-schema.sql
-02-memberpoint-schema.sql
-03-battle-schema.sql
-04-insight-schema.sql
-```
-
-### 주의
-
-docker-entrypoint-initdb.d 스크립트는 MySQL 컨테이너 최초 생성 시에만 실행된다.
-
-SQL 수정 후 재반영하려면
-
-```bash
-docker compose down -v
-docker compose up -d
-```
-
-를 수행해야 한다.
+Docker는 database와 계정만 생성한다. 테이블 생성·변경은 각 Spring Boot 서비스의 Flyway migration이 담당한다. 빈 DB에서 서비스가 처음 기동될 때 `V1__baseline.sql`이 적용되며, 기존 schema에는 Flyway가 baseline history를 기록한 뒤 후속 migration만 적용한다.
 
 ---
 
@@ -200,9 +168,9 @@ docker compose up -d
 spring:
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3307/market?serverTimezone=Asia/Seoul&characterEncoding=UTF-8
-    username: root
-    password: 1234
+    url: jdbc:mysql://localhost:3308/market?serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+    username: market_user
+    password: market-local-password
 ```
 
 ### 실행
@@ -240,8 +208,14 @@ EC2 1대 + Docker Compose + Docker MySQL
 ```text
 DB_HOST
 DB_PORT
-DB_USERNAME
-DB_PASSWORD
+MEMBERPOINT_DB_USERNAME
+MEMBERPOINT_DB_PASSWORD
+MARKET_DB_USERNAME
+MARKET_DB_PASSWORD
+BATTLE_DB_USERNAME
+BATTLE_DB_PASSWORD
+INSIGHT_DB_USERNAME
+INSIGHT_DB_PASSWORD
 ```
 
 권장 관리 방법
@@ -259,13 +233,13 @@ DB_PASSWORD
 Windows
 
 ```bash
-netstat -ano | findstr 3307
+netstat -ano | findstr 3308
 ```
 
 Mac / Linux
 
 ```bash
-lsof -i :3307
+lsof -i :3308
 ```
 
 ### 컨테이너 상태 확인
@@ -277,13 +251,13 @@ docker ps
 ### 컨테이너 로그 확인
 
 ```bash
-docker logs todongsan-mysql
+docker logs market-mysql
 ```
 
 ### MySQL 접속 확인
 
 ```bash
-docker exec -it todongsan-mysql mysql -u root -p
+docker exec -it market-mysql mysql -u market_user -p market
 ```
 
 ---
@@ -307,7 +281,7 @@ Local integrated Docker execution uses the infra compose plus the root app compo
 infra/docker-compose.yml
   - MySQL only
   - creates todongsan-network
-  - runs todongsan-mysql
+  - runs member-point-mysql, market-mysql, battle-mysql, insight-mysql
 
 docker-compose.yml
   - app services only
@@ -377,8 +351,8 @@ Network rules:
 ```text
 Inside Docker Compose, localhost means the current container itself.
 Container-to-container calls must use Docker Compose service names.
-DB host inside app containers is todongsan-mysql.
-Use localhost:3307 only from the host PC when connecting to MySQL.
+Each app connects only to its matching DB service at port 3306.
+Use localhost:3307/3308/3309/3310 only from the host PC.
 ```
 
 Service URL examples for integrated compose:
@@ -436,10 +410,7 @@ service .env.rds
 JPA local policy:
 
 ```text
-battle-service and insight-reputation-service are JPA-based services.
-In local Docker MySQL integration tests, ddl-auto=update may create or adjust their schema.
-This is allowed only for local integration testing.
-EC2 Docker MySQL deployment ddl-auto policy must be reviewed before deployment.
+JPA 서비스는 `ddl-auto=validate`로 Flyway가 만든 schema를 검증한다. H2 기반 테스트 profile만 자체 테스트 schema 전략을 유지하며 Flyway를 비활성화한다.
 ```
 
 Forbidden commands for normal local verification and EC2 Docker MySQL deployment:
@@ -467,11 +438,128 @@ docs/infra/EC2_DOCKER_DEPLOY.md
 핵심 원칙:
 
 ```text
-1. infra/docker-compose.yml로 todongsan-mysql을 먼저 실행한다.
+1. infra/docker-compose.yml로 네 개의 서비스 전용 MySQL을 먼저 실행한다.
 2. root docker-compose.yml로 app service 5개를 실행한다.
 3. root .env는 .env.ec2.example을 복사해 EC2에서 수동 작성한다.
 4. 외부 진입점은 api-gateway:9000으로 제한한다.
 5. MySQL 3306과 내부 서비스 포트 8080~8083은 외부에 공개하지 않는다.
 6. docker compose down -v와 docker volume rm/prune은 사용하지 않는다.
 7. 시연 또는 위험 작업 전 mysqldump 백업을 남긴다.
+```
+
+---
+
+## 17. Kafka / Debezium CDC (로컬)
+
+SSOT는 각 서비스 DB이며, 이벤트는 outbox 테이블 → Debezium(CDC) → Kafka 경로로 발행한다. (루트 `AGENTS.md` 섹션 5)
+
+| 컨테이너 | 이미지 | 호스트 포트 | 내부 주소 |
+|---|---|---|---|
+| kafka | apache/kafka:3.9.1 (KRaft) | 127.0.0.1:9092 | kafka:29092 |
+| kafka-connect | quay.io/debezium/connect:3.0 | 127.0.0.1:18083 | kafka-connect:8083 |
+
+Connect REST는 insight-reputation-service(8083)와 겹치지 않도록 호스트 포트 18083을 사용한다.
+
+### 실행 순서
+
+```bash
+cd infra
+docker compose up -d market-mysql                      # binlog/GTID 설정 포함
+docker compose -f docker-compose.kafka.yml up -d       # kafka + kafka-connect
+
+# Debezium 전용 계정 생성 (최초 1회, 재실행 안전)
+docker exec -i market-mysql mysql -uroot -p<MARKET_MYSQL_ROOT_PASSWORD> < debezium/market-debezium-user.sql
+```
+
+### 확인
+
+```bash
+curl -s http://localhost:18083/connector-plugins   # io.debezium.connector.mysql.MySqlConnector 포함 여부
+docker exec market-mysql mysql -uroot -p<PW> -e "SELECT @@log_bin, @@binlog_format, @@binlog_row_image, @@gtid_mode"
+```
+
+Git Bash에서 `docker exec kafka /opt/kafka/bin/...`를 실행할 때는 경로 변환을 막기 위해 `MSYS_NO_PATHCONV=1`을 붙인다.
+
+### 커넥터 설정 주의
+
+- MySQL 컨테이너의 `TZ=Asia/Seoul` 때문에 서버 time zone이 `KST`로 잡혀 JDBC 연결이 실패한다. 커넥터 설정에 `"database.connectionTimeZone": "Asia/Seoul"`을 반드시 넣는다.
+- `DATETIME` 컬럼은 time zone 정보 없이 epoch millis(UTC 기준 해석)로 발행된다. Consumer는 이 값을 KST 로컬 시각으로 해석해야 한다.
+- 종료: `docker compose -f docker-compose.kafka.yml down` (`-v` 사용 금지)
+
+### 비동기 포인트 흐름 실행 (Market 환불 → Member-Point)
+
+설계: `docs/architecture/ASYNC_POINT_FLOW.md`
+
+```bash
+# 1) member-point-mysql도 binlog/GTID 설정 포함. Debezium 계정 (최초 1회, 재실행 안전)
+docker exec -i member-point-mysql mysql -uroot -p<MEMBERPOINT_MYSQL_ROOT_PASSWORD> < infra/debezium/memberpoint-debezium-user.sql
+
+# 2) outbox 커넥터 등록/갱신 (PUT, 재실행 안전). 각 서비스를 한 번 기동해 Flyway V2가 적용된 뒤 등록한다
+./infra/debezium/register-connector.sh market-outbox
+./infra/debezium/register-connector.sh memberpoint-outbox
+
+# 3) 서비스 실행 시 환경 변수
+#    market-service:       MARKET_POINT_TRANSPORT_MODE=async        (기본 sync)
+#                          MARKET_POINT_REQUEST_KEY=member_id       (실험 시 market_id)
+#                          MARKET_POINT_RESULTS_CONSUMER_ENABLED=true (기본 false)
+#    member-point-service: MARKET_POINT_REQUESTS_CONSUMER_ENABLED=true (기본 false)
+#    공통:                 KAFKA_BOOTSTRAP_SERVERS=localhost:9092 (컨테이너 내부에서는 kafka:29092)
+#                          KAFKA_LISTENER_CONCURRENCY=3 (기본 3, 파티션 수와 맞춘다)
+```
+
+파티션 수: 토픽은 브로커 기본값(`KAFKA_NUM_PARTITIONS: 3`)으로 자동 생성된다. 실제 병렬도는 min(listener 동시성 × 인스턴스 수, 파티션 수)이다.
+파티션은 늘리기만 가능하고, 늘리면 key → 파티션 배치가 바뀌어 같은 key가 잠시 두 thread에서 처리될 수 있다. 정합성은 멱등성·상태 가드로 유지되고 락 경합만 일시적으로 는다 (`ASYNC_POINT_FLOW.md` §3.3).
+
+| 토픽 | 발행 | 소비 | key |
+|---|---|---|---|
+| `market.settlement-payout-requests` | Debezium (`market_outbox_event`, `aggregate_type = settlement-payout-requests`) | member-point-service (전용 listener) | `member_id` |
+| `market.refund-requests` | Debezium (`market_outbox_event`, `aggregate_type = refund-requests`) | member-point-service (전용 listener) | `member_id` |
+| `market.settlement-payout-requests-dlt`, `market.refund-requests-dlt` | member-point-service (처리 실패) | 수동 확인 | 원본 key |
+| `memberpoint.point-results` | Debezium (`point_outbox_event`) | market-service | `market_id` |
+| `memberpoint.point-results-dlt` | market-service (처리 실패) | 수동 확인 | 원본 key |
+
+### 비동기 포인트 흐름 운영 (ASYNC_POINT_FLOW.md §6, §15.1)
+
+**점검** — 커넥터 상태, consumer lag, DLT 적재·미재발행 건수를 한 번에 본다.
+커넥터가 `RUNNING`이 아니거나 미재발행 DLT가 있으면 종료 코드 1.
+
+```bash
+./scripts/cdc/health.sh
+```
+
+**DLT 유입 알림** — 각 서비스가 DLT로 보낼 때 ERROR 로그를 남긴다.
+
+```text
+Sent to DLT. topic=market.settlement-payout-requests, partition=0, offset=12, key=999, cause=...NonRetryableEventException: ...
+Failed to publish to DLT. ...   ← DLT 발행 자체가 실패. 레코드는 커밋되지 않고 다시 처리된다
+```
+
+**DLT 처리** — 원인을 해결한 뒤 재발행하거나, 재처리할 수 없는 메시지는 확인 후 건너뛴다.
+
+```bash
+# 재발행 (소비 측이 멱등이므로 안전). 전용 group으로 이미 재발행한 메시지는 다시 보내지 않는다
+./scripts/cdc/replay-dlt.sh market.settlement-payout-requests-dlt --dry-run
+./scripts/cdc/replay-dlt.sh market.settlement-payout-requests-dlt
+
+# 건너뛰기 (재처리 불가 메시지를 확인 완료로 표시). 메시지는 DLT 토픽에 그대로 남는다
+MSYS_NO_PATHCONV=1 docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:29092 \
+  --group dlt-replay.market.settlement-payout-requests-dlt --topic market.settlement-payout-requests-dlt --reset-offsets --to-latest --execute
+```
+
+**커넥터 재시작** — 상태가 `FAILED`이면 원인(커넥터 로그) 확인 후 재시작한다. outbox row는 DB에 남아 있으므로 binlog 위치부터 다시 발행된다.
+
+```bash
+curl -s http://localhost:18083/connectors/market-outbox/status
+docker logs kafka-connect --since 10m 2>&1 | grep -E "ERROR|WARN"
+curl -s -X POST "http://localhost:18083/connectors/market-outbox/restart?includeTasks=true&onlyFailed=true"
+```
+
+**outbox 삭제** — Market·MP 스케줄러가 7일 지난 row를 1,000건 × 최대 10배치씩 매시간 삭제한다
+(`market.scheduler.outbox-cleanup.*`, `member-point.outbox-cleanup.*`). Debezium은 DELETE를 발행하지 않는다.
+
+consumer group 상세 (토픽·파티션별 lag):
+
+```bash
+MSYS_NO_PATHCONV=1 docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:29092 --describe --group member-point-service   # 또는 market-service
 ```

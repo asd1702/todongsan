@@ -27,7 +27,9 @@ import org.springframework.test.context.ActiveProfiles;
  *   - 가격 합(= 1.0), real pool 합, total_pool, price_history 건수가
  *   전부 정합성을 유지하고 lost update 가 0 건이어야 한다.
  *
- * 실행 전 제: infra/docker-compose 로 MySQL(localhost:3307/market) 이 떠 있어야 한다.
+ * 실행 전제: Market 전용 MySQL에 market_test 전용 계정/빈 스키마를 준비하고
+ * Market Flyway migration을 적용할 수 있어야 한다.
+ * MARKET_IT_DB_URL, MARKET_IT_DB_USERNAME, MARKET_IT_DB_PASSWORD를 설정한다.
  * 실행: ./gradlew test --tests "*MarketPredictionConcurrencyConsistencyTest" -Dspring.profiles.active=mysqlit
  */
 @SpringBootTest
@@ -52,7 +54,10 @@ class MarketPredictionConcurrencyConsistencyTest {
     @BeforeEach
     void setUp() {
         assertThat(jdbc.queryForObject("SELECT DATABASE()", String.class)).isEqualTo("market_test");
-        // FK 안전 순서로 정리
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM flyway_schema_history WHERE success = TRUE", Integer.class))
+                .isPositive();
+        clearMarketData();
         seedActiveMarketWithTwoOptions();
         seedPendingPredictions(CONCURRENCY);
     }
@@ -134,6 +139,19 @@ class MarketPredictionConcurrencyConsistencyTest {
     }
 
     // ---------------------------------------------------------------- seeding
+
+    private void clearMarketData() {
+        jdbc.update("DELETE FROM market_price_history");
+        jdbc.update("DELETE FROM market_reputation_update");
+        jdbc.update("DELETE FROM market_refund_detail");
+        jdbc.update("DELETE FROM market_void");
+        jdbc.update("DELETE FROM market_settlement_detail");
+        jdbc.update("DELETE FROM market_settlement");
+        jdbc.update("DELETE FROM market_prediction");
+        jdbc.update("DELETE FROM market_comment");
+        jdbc.update("DELETE FROM market_option");
+        jdbc.update("DELETE FROM market");
+    }
 
     private void seedActiveMarketWithTwoOptions() {
         LocalDateTime now = LocalDateTime.now();

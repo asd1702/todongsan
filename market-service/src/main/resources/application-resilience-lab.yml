@@ -1,0 +1,5 @@
+resilience:
+  lab:
+    market:
+      delay-ms: ${RESILIENCE_LAB_MARKET_DELAY_MS:0}
+      status-code: ${RESILIENCE_LAB_MARKET_STATUS_CODE:0}

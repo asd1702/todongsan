@@ -8,9 +8,9 @@ services:
     restart: unless-stopped
     environment:
       TZ: Asia/Seoul
-      DB_URL: jdbc:mysql://todongsan-mysql:3306/memberpoint?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
-      DB_USERNAME: root
-      DB_PASSWORD: 1234
+      DB_URL: jdbc:mysql://member-point-mysql:3306/memberpoint?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
+      DB_USERNAME: memberpoint_user
+      DB_PASSWORD: memberpoint-local-password
       JWT_SECRET: local-jwt-secret-change-me-32chars
       CRYPTO_AES_KEY: 0123456789abcdef0123456789abcdef
       KAKAO_CLIENT_ID: local-kakao-client-id

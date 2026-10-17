@@ -6,6 +6,7 @@ import static org.mockito.Mockito.when;
 
 import com.todongsan.marketservice.global.exception.CustomException;
 import com.todongsan.marketservice.global.exception.errorcode.MarketErrorCode;
+import com.todongsan.marketservice.market.debug.MarketPredictionDeadlockDebug;
 import com.todongsan.marketservice.market.dto.request.QuoteMarketPredictionRequest;
 import com.todongsan.marketservice.market.dto.response.QuoteMarketPredictionResponse;
 import com.todongsan.marketservice.market.entity.Market;
@@ -31,7 +32,7 @@ class MarketPredictionTransactionServiceQuoteTest {
 
     @Test
     void quotePredictionRejectsNullCurrentPriceAsInvalidOption() {
-        MarketPredictionTransactionService service = new MarketPredictionTransactionService(marketMapper);
+        MarketPredictionTransactionService service = service();
         MarketOption selectedOption = option(SELECTED_OPTION_ID, "200.00", "0.00", null);
         when(marketMapper.selectMarketById(MARKET_ID)).thenReturn(activeMarket());
         when(marketMapper.selectOptionsByMarketId(MARKET_ID)).thenReturn(List.of(
@@ -47,7 +48,7 @@ class MarketPredictionTransactionServiceQuoteTest {
 
     @Test
     void quotePredictionRejectsNullRealPoolAmountAsInvalidOption() {
-        MarketPredictionTransactionService service = new MarketPredictionTransactionService(marketMapper);
+        MarketPredictionTransactionService service = service();
         when(marketMapper.selectMarketById(MARKET_ID)).thenReturn(activeMarket());
         when(marketMapper.selectOptionsByMarketId(MARKET_ID)).thenReturn(List.of(
                 option(1L, "800.00", "0.00", "0.80000000"),
@@ -62,7 +63,7 @@ class MarketPredictionTransactionServiceQuoteTest {
 
     @Test
     void quotePredictionRejectsNullVirtualPoolAmountAsInvalidOption() {
-        MarketPredictionTransactionService service = new MarketPredictionTransactionService(marketMapper);
+        MarketPredictionTransactionService service = service();
         when(marketMapper.selectMarketById(MARKET_ID)).thenReturn(activeMarket());
         when(marketMapper.selectOptionsByMarketId(MARKET_ID)).thenReturn(List.of(
                 option(1L, "800.00", "0.00", "0.80000000"),
@@ -77,7 +78,7 @@ class MarketPredictionTransactionServiceQuoteTest {
 
     @Test
     void quotePredictionRoundsMoneyScaleWithQuoteRoundingMode() {
-        MarketPredictionTransactionService service = new MarketPredictionTransactionService(marketMapper);
+        MarketPredictionTransactionService service = service();
         when(marketMapper.selectMarketById(MARKET_ID)).thenReturn(activeMarket());
         when(marketMapper.selectOptionsByMarketId(MARKET_ID)).thenReturn(List.of(
                 option(1L, "799.995", "0.00", "0.80000000"),
@@ -94,6 +95,13 @@ class MarketPredictionTransactionServiceQuoteTest {
 
     private QuoteMarketPredictionRequest quoteRequest() {
         return new QuoteMarketPredictionRequest(SELECTED_OPTION_ID, "100.00");
+    }
+
+    private MarketPredictionTransactionService service() {
+        return new MarketPredictionTransactionService(
+                marketMapper,
+                new MarketPredictionDeadlockDebug(false)
+        );
     }
 
     private Market activeMarket() {

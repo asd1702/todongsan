@@ -135,21 +135,61 @@ class InternalMarketPredictionReconciliationControllerTest {
         assertPredictionWithoutPriceConfirmation(100L, "FAILED", "POINT_INSUFFICIENT");
     }
 
+    /** NOT_FOUND면 바로 FAILED로 종결하지 않고 먼저 펜싱해 늦게 도착한 spend를 막는다 (ASYNC_POINT_FLOW.md §12.6). */
     @Test
-    void reconcileNotFoundMarksPredictionFailedAndDoesNotSpendAgain() throws Exception {
+    void reconcileNotFoundFencesSpendBeforeMarkingPredictionFailed() throws Exception {
         insertMarket(MARKET_ID, "ACTIVE", LocalDateTime.now().plusDays(1));
         insertOptions(MARKET_ID);
         insertPrediction(100L, MARKET_ID, OPTION_ID, 10L, "POINT_UNKNOWN", OLD_UPDATED_AT);
         stubStatus(key(MARKET_ID, 10L), MemberPointTransactionStatus.NOT_FOUND, null);
+        stubFence(key(MARKET_ID, 10L), MemberPointTransactionStatus.FAILED, "POINT_SPEND_FENCED");
 
         mockMvc.perform(post("/api/v1/internal/markets/predictions/reconcile"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.failedCount").value(1))
                 .andExpect(jsonPath("$.data.notFoundCount").value(1));
 
-        assertPredictionWithoutPriceConfirmation(100L, "FAILED", "POINT_TRANSACTION_NOT_FOUND");
-        verify(memberPointClient).getTransactionStatus(key(MARKET_ID, 10L));
+        assertPredictionWithoutPriceConfirmation(100L, "FAILED", "POINT_SPEND_FENCED");
+        // 원래 spend와 같은 요청 내용 (MP request_hash 일치)
+        verify(memberPointClient).fenceSpend(new PointSpendCommand(
+                10L, "SPEND_MARKET", new BigDecimal("100.00"), "MARKET_PREDICTION", 100L, key(MARKET_ID, 10L)));
         verify(memberPointClient, org.mockito.Mockito.never()).spend(any(PointSpendCommand.class));
+    }
+
+    /** 조회와 펜싱 사이에 늦은 spend가 먼저 처리되면 펜싱은 PROCESSED를 돌려주고, 예측을 확정한다 (forward recovery). */
+    @Test
+    void reconcileNotFoundConfirmsPredictionWhenLateSpendWonTheFence() throws Exception {
+        insertMarket(MARKET_ID, "ACTIVE", LocalDateTime.now().plusDays(1));
+        insertOptions(MARKET_ID);
+        insertPrediction(100L, MARKET_ID, OPTION_ID, 10L, "POINT_UNKNOWN", OLD_UPDATED_AT);
+        stubStatus(key(MARKET_ID, 10L), MemberPointTransactionStatus.NOT_FOUND, null);
+        stubFence(key(MARKET_ID, 10L), MemberPointTransactionStatus.PROCESSED, null);
+
+        mockMvc.perform(post("/api/v1/internal/markets/predictions/reconcile"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.confirmedCount").value(1))
+                .andExpect(jsonPath("$.data.failedCount").value(0))
+                .andExpect(jsonPath("$.data.notFoundCount").value(1));
+
+        assertPredictionConfirmed(100L);
+    }
+
+    @Test
+    void reconcileNotFoundKeepsPointUnknownWhenFenceFails() throws Exception {
+        insertMarket(MARKET_ID, "ACTIVE", LocalDateTime.now().plusDays(1));
+        insertOptions(MARKET_ID);
+        insertPrediction(100L, MARKET_ID, OPTION_ID, 10L, "POINT_UNKNOWN", OLD_UPDATED_AT);
+        stubStatus(key(MARKET_ID, 10L), MemberPointTransactionStatus.NOT_FOUND, null);
+        when(memberPointClient.fenceSpend(any(PointSpendCommand.class)))
+                .thenThrow(new MemberPointTimeoutException("timeout"));
+
+        mockMvc.perform(post("/api/v1/internal/markets/predictions/reconcile"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.failedCount").value(0))
+                .andExpect(jsonPath("$.data.unknownCount").value(1));
+
+        // 이미 POINT_UNKNOWN이면 상태·사유를 그대로 두고, 다음 대사에서 다시 조회·펜싱한다
+        assertPredictionWithoutPriceConfirmation(100L, "POINT_UNKNOWN", null);
     }
 
     @Test
@@ -236,6 +276,7 @@ class InternalMarketPredictionReconciliationControllerTest {
         insertPrediction(200L, 2L, 21L, 20L, "POINT_UNKNOWN", OLD_UPDATED_AT);
         stubStatus(key(MARKET_ID, 10L), MemberPointTransactionStatus.PROCESSED, null);
         stubStatus(key(MARKET_ID, 11L), MemberPointTransactionStatus.NOT_FOUND, null);
+        stubFence(key(MARKET_ID, 11L), MemberPointTransactionStatus.FAILED, "POINT_SPEND_FENCED");
         stubStatus(key(MARKET_ID, 12L), MemberPointTransactionStatus.UNKNOWN, null);
         stubStatus(key(MARKET_ID, 13L), MemberPointTransactionStatus.FAILED, "MEMBER_NOT_FOUND");
         stubStatus(key(2L, 20L), MemberPointTransactionStatus.PROCESSED, null);
@@ -254,6 +295,23 @@ class InternalMarketPredictionReconciliationControllerTest {
 
     private void stubStatus(String idempotencyKey, MemberPointTransactionStatus status, String errorCode) {
         when(memberPointClient.getTransactionStatus(eq(idempotencyKey)))
+                .thenReturn(new MemberPointTransactionStatusResponse(
+                        idempotencyKey,
+                        status,
+                        null,
+                        "SPEND_MARKET",
+                        null,
+                        "MARKET_PREDICTION",
+                        null,
+                        null,
+                        LocalDateTime.now(),
+                        errorCode
+                ));
+    }
+
+    private void stubFence(String idempotencyKey, MemberPointTransactionStatus status, String errorCode) {
+        when(memberPointClient.fenceSpend(org.mockito.ArgumentMatchers.argThat(
+                command -> command != null && idempotencyKey.equals(command.idempotencyKey()))))
                 .thenReturn(new MemberPointTransactionStatusResponse(
                         idempotencyKey,
                         status,

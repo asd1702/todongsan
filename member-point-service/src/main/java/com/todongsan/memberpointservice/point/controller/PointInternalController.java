@@ -55,6 +55,14 @@ public class PointInternalController {
         return ResponseEntity.ok(ApiResponse.ok(pointInternalService.refund(idempotencyKey, request)));
     }
 
+    /** Market 예측 차감 펜싱 (MEMBER_POINT_API_SPEC.md 3-5, ASYNC_POINT_FLOW.md §12.6). 응답은 거래 상태 조회와 같은 형식이다. */
+    @PostMapping("/spend/fence")
+    public ResponseEntity<ApiResponse<TransactionResponse>> fenceSpend(
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestBody SpendRequest request) {
+        return ResponseEntity.ok(ApiResponse.ok(pointInternalService.fenceSpend(idempotencyKey, request)));
+    }
+
     @GetMapping("/transactions")
     public ResponseEntity<ApiResponse<TransactionResponse>> getTransaction(@RequestParam(required = false) String idempotencyKey) {
         return ResponseEntity.ok(ApiResponse.ok(pointInternalService.getTransaction(idempotencyKey)));

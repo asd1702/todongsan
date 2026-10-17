@@ -38,9 +38,9 @@ docker-compose down
 
 | 구분 | 로컬 (.env.local) | RDS (.env.rds) |
 |------|-------------------|----------------|
-| **DB 호스트** | `todongsan-mysql` | `todongsan-dev.cdwkgswgkayp.ap-northeast-2.rds.amazonaws.com` |
+| **DB 호스트** | `insight-mysql` | `todongsan-dev.cdwkgswgkayp.ap-northeast-2.rds.amazonaws.com` |
 | **DB 포트** | `3306` | `3306` |
-| **DB 사용자** | `root` | `admin` |
+| **DB 사용자** | `insight_user` | `admin` |
 | **SSL** | `false` | `true` |
 | **네트워크** | `infra_default` | `insight-rds-network` |
 | **서비스 URL** | `localhost:808x` | `service-name:808x` |
@@ -58,7 +58,7 @@ docker-compose ps
 ## 🛠 트러블슈팅
 
 ### MySQL 연결 문제
-- 로컬: `todongsan-mysql` 컨테이너가 실행 중인지 확인
+- 로컬: `insight-mysql` 컨테이너가 실행 중인지 확인
 - RDS: AWS RDS 인스턴스 상태 및 보안 그룹 확인
 
 ### 네트워크 문제

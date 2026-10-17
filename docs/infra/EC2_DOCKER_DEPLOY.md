@@ -9,7 +9,7 @@ RDS is not used for the current deployment because of cost. Existing RDS example
 ```text
 EC2 instance
 ├─ Docker network: todongsan-network
-├─ MySQL container: todongsan-mysql
+├─ MySQL containers: member-point-mysql, market-mysql, battle-mysql, insight-mysql
 ├─ api-gateway: 9000
 ├─ member-point-service: 8080
 ├─ battle-service: 8081
@@ -17,14 +17,13 @@ EC2 instance
 └─ insight-reputation-service: 8083
 ```
 
-Database schemas in Docker MySQL:
+Service-owned Docker MySQL databases:
 
 ```text
-Docker MySQL
-├─ memberpoint
-├─ battle
-├─ market
-└─ insight
+member-point-mysql → memberpoint (memberpoint_user)
+market-mysql       → market (market_user)
+battle-mysql       → battle (battle_user)
+insight-mysql      → insight (insight_user)
 ```
 
 The MSA structure remains unchanged. Each application runs as an independent container and communicates by REST URLs. Each service accesses only its own schema.
@@ -78,7 +77,9 @@ docker compose ps
 docker compose logs --tail=100
 ```
 
-The root `docker-compose.yml` does not include MySQL. It expects `todongsan-mysql` and the external `todongsan-network` created by `infra/docker-compose.yml`.
+The root `docker-compose.yml` does not include MySQL. It expects the four service-owned MySQL containers and the external `todongsan-network` created by `infra/docker-compose.yml`.
+
+Do not include `infra/docker-compose.test.yml` on EC2. That override is local/integration-test-only and starts the disposable `market-mysql-it` (`market_test`) container.
 
 ## 4. Smoke Tests
 
@@ -117,9 +118,8 @@ docker volume rm
 docker volume prune
 ```
 
-MySQL data is stored in the compose volume key `todongsan_mysql_data`.
-With the current `infra/docker-compose.yml` project name, `docker compose config` may render the actual Docker volume name as `infra_todongsan_mysql_data`.
-Preserve the actual volume shown by `docker volume ls`. Recreating the `todongsan-mysql` container is acceptable only if this volume is preserved.
+MySQL data is stored in independent named volumes: `memberpoint-mysql-data`, `market-mysql-data`, `battle-mysql-data`, and `insight-mysql-data`.
+Preserve each actual volume shown by `docker volume ls`. Recreating one MySQL container is acceptable only if its matching volume is preserved.
 
 ## 7. MySQL Backup And Restore
 
@@ -129,19 +129,19 @@ Create a backup directory:
 mkdir -p ~/todongsan-backups
 ```
 
-Backup all Todongsan schemas:
+Backup each service database with its service account:
 
 ```bash
-docker exec todongsan-mysql \
-  mysqldump -uroot -p --databases memberpoint battle market insight \
-  > ~/todongsan-backups/todongsan-all.sql
+docker exec member-point-mysql mysqldump -umemberpoint_user -p memberpoint > ~/todongsan-backups/memberpoint.sql
+docker exec market-mysql mysqldump -umarket_user -p market > ~/todongsan-backups/market.sql
+docker exec battle-mysql mysqldump -ubattle_user -p battle > ~/todongsan-backups/battle.sql
+docker exec insight-mysql mysqldump -uinsight_user -p insight > ~/todongsan-backups/insight.sql
 ```
 
 Restore from a backup:
 
 ```bash
-docker exec -i todongsan-mysql \
-  mysql -uroot -p < ~/todongsan-backups/todongsan-all.sql
+docker exec -i market-mysql mysql -umarket_user -p market < ~/todongsan-backups/market.sql
 ```
 
 Prefer interactive password input instead of writing the password directly in the command. Backup files may contain personal or production data, so do not share them externally. Take a dump backup before demonstrations or risky deployment changes.

@@ -16,7 +16,7 @@ spring:
   
   jpa:
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
     show-sql: false
     properties:
       hibernate:
@@ -27,6 +27,9 @@ spring:
   sql:
     init:
       mode: never
+  flyway:
+    enabled: true
+    baseline-on-migrate: ${FLYWAY_BASELINE_ON_MIGRATE:false}
 
 server:
   port: 8083
@@ -71,3 +74,10 @@ client:
     base-url: ${MEMBER_POINT_SERVICE_BASE_URL}
   market:
     base-url: ${MARKET_SERVICE_BASE_URL}
+    connect-timeout-ms: ${MARKET_CLIENT_CONNECT_TIMEOUT_MS:500}
+    read-timeout-ms: ${MARKET_CLIENT_READ_TIMEOUT_MS:1000}
+
+todongsan:
+  resilience:
+    market-client:
+      enabled: ${RESILIENCE_MARKET_CLIENT_ENABLED:false}

@@ -1,0 +1,66 @@
+services:
+  market-mysql-it:
+    image: mysql:8.4
+    container_name: market-mysql-it
+    restart: "no"
+    ports:
+      - "127.0.0.1:13308:3306"
+    environment:
+      MYSQL_DATABASE: market_test
+      MYSQL_USER: ${MARKET_IT_DB_USERNAME:-market_test_user}
+      MYSQL_PASSWORD: ${MARKET_IT_DB_PASSWORD:-market-test-local-password}
+      MYSQL_ROOT_PASSWORD: ${MARKET_IT_MYSQL_ROOT_PASSWORD:-market-test-root-local-password}
+      TZ: Asia/Seoul
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # 벤치(실험 A/E/D)는 Hikari pool 220 을 쓴다. 기본 151 이면 C=200 구간에서
+      # "Too many connections" 로 죽으므로 헤드룸을 확보한다.
+      - --max-connections=300
+      # disposable integration DB에서만 deadlock graph를 MySQL error log에 남긴다.
+      - --innodb-print-all-deadlocks=ON
+    # The integration-test database is intentionally disposable and never shares
+    # the development market-mysql volume.
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - todongsan-network
+
+  # Member-Point 적립 배치는 MySQL 전용 문법(VALUES ROW JOIN)을 쓴다. H2로 검증할 수 없는 테스트용 (ASYNC_POINT_FLOW.md §17.9)
+  member-point-mysql-it:
+    image: mysql:8.4
+    container_name: member-point-mysql-it
+    restart: "no"
+    ports:
+      - "127.0.0.1:13307:3306"
+    environment:
+      MYSQL_DATABASE: memberpoint_test
+      MYSQL_USER: ${MEMBERPOINT_IT_DB_USERNAME:-memberpoint_test_user}
+      MYSQL_PASSWORD: ${MEMBERPOINT_IT_DB_PASSWORD:-memberpoint-test-local-password}
+      MYSQL_ROOT_PASSWORD: ${MEMBERPOINT_IT_MYSQL_ROOT_PASSWORD:-memberpoint-test-root-local-password}
+      TZ: Asia/Seoul
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    # market-mysql-it과 같이 버리는 DB. 개발용 member-point-mysql 볼륨과 공유하지 않는다.
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - todongsan-network
+
+networks:
+  todongsan-network:
+    name: todongsan-network
+    driver: bridge

@@ -7,6 +7,7 @@ import com.todongsan.marketservice.market.client.http.MemberPointHttpDtos.Settle
 import com.todongsan.marketservice.market.client.http.MemberPointHttpDtos.SpendRequest;
 import com.todongsan.marketservice.market.client.http.MemberPointHttpDtos.SpendResponse;
 import com.todongsan.marketservice.market.client.http.MemberPointHttpDtos.TransactionStatusResponse;
+import feign.Request;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -20,10 +21,18 @@ import org.springframework.web.bind.annotation.RequestParam;
 )
 public interface MemberPointInternalFeignClient {
 
+    /** options: 차감만 readTimeout을 따로 준다 (client.member-point.spend-read-timeout-millis, SPEND_CIRCUIT_BREAKER.md B7) */
     @PostMapping("/internal/api/v1/points/spend")
     MemberPointApiResponse<SpendResponse> spend(
+            Request.Options options,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @RequestHeader("X-Member-Id") Long memberId,
+            @RequestBody SpendRequest request
+    );
+
+    @PostMapping("/internal/api/v1/points/spend/fence")
+    MemberPointApiResponse<TransactionStatusResponse> fenceSpend(
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
             @RequestBody SpendRequest request
     );
 

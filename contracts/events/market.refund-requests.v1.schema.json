@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://todongsan/contracts/events/market.refund-requests.v1.schema.json",
+  "title": "market.refund-requests v1",
+  "description": "Market -> Member-Point 무효 환불 적립 요청. 회원(prediction) 1건당 이벤트 1개. Kafka key = member_id.",
+  "type": "object",
+  "required": ["eventId", "eventType", "schemaVersion", "occurredAt", "producer", "data"],
+  "properties": {
+    "eventId": { "type": "string", "format": "uuid" },
+    "eventType": {
+      "type": "string",
+      "const": "MARKET_REFUND_REQUESTED"
+    },
+    "schemaVersion": { "const": 1 },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601, offset 포함 (예: 2026-09-30T18:00:00.123+09:00)"
+    },
+    "producer": { "const": "market-service" },
+    "data": {
+      "type": "object",
+      "required": ["marketId", "predictionId", "memberId", "amount", "referenceType", "referenceId", "reason", "idempotencyKey"],
+      "properties": {
+        "marketId": { "type": "integer", "minimum": 1 },
+        "predictionId": { "type": "integer", "minimum": 1 },
+        "memberId": { "type": "integer", "minimum": 1 },
+        "amount": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]{2}$",
+          "description": "항상 양수. 방향(+/-)은 eventType이 결정한다."
+        },
+        "referenceType": { "const": "MARKET_PREDICTION" },
+        "referenceId": { "type": "integer", "minimum": 1, "description": "predictionId와 같은 값" },
+        "reason": { "type": "string", "maxLength": 255 },
+        "idempotencyKey": {
+          "type": "string",
+          "maxLength": 150,
+          "pattern": "^MARKET_REFUND:market:[0-9]+:prediction:[0-9]+:member:[0-9]+$"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

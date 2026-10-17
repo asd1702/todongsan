@@ -2,6 +2,7 @@ package com.todongsan.marketservice.market.repository;
 
 import com.todongsan.marketservice.market.entity.Market;
 import com.todongsan.marketservice.market.entity.MarketOption;
+import com.todongsan.marketservice.market.entity.MarketOutboxEvent;
 import com.todongsan.marketservice.market.entity.MarketPrediction;
 import com.todongsan.marketservice.market.entity.MarketPriceHistory;
 import com.todongsan.marketservice.market.entity.MarketRefundDetail;
@@ -149,14 +150,18 @@ public interface MarketMapper {
 
     List<MyMarketPredictionRow> selectPredictionsByMemberId(MyMarketPredictionSearchCondition condition);
 
-    MarketPrediction lockPredictionByMarketIdAndMemberId(
-            @Param("marketId") long marketId,
-            @Param("memberId") long memberId
-    );
-
     MarketPrediction selectPredictionById(@Param("predictionId") long predictionId);
 
     MarketPrediction lockPredictionById(@Param("predictionId") long predictionId);
+
+    /** 묶음 확정: 예측들을 ID 오름차순으로 잠근다 (PREDICTION_BATCH_CONFIRM.md P4) */
+    List<MarketPrediction> lockPredictionsByIdsInOrder(@Param("predictionIds") List<Long> predictionIds);
+
+    /** 묶음 확정: 예측 여러 건을 문장 1개로 확정한다. 상태 조건은 updatePredictionConfirmed와 같다 */
+    int updatePredictionsConfirmed(
+            @Param("rows") List<ConfirmedPredictionRow> rows,
+            @Param("updatedAt") LocalDateTime updatedAt
+    );
 
     List<MarketPrediction> selectPredictionsForSpendReconciliation(
             @Param("pendingThreshold") LocalDateTime pendingThreshold,
@@ -254,15 +259,24 @@ public interface MarketMapper {
 
     List<MarketSettlementDetail> selectSettlementDetailsBySettlementId(@Param("settlementId") long settlementId);
 
-    List<MarketSettlementDetail> selectRetryableSettlementDetails(@Param("settlementId") long settlementId);
+    List<MarketSettlementDetail> selectRetryableSettlementDetails(
+            @Param("settlementId") long settlementId,
+            @Param("pendingThreshold") LocalDateTime pendingThreshold
+    );
 
-    List<Long> selectMarketIdsForSettlementRetry(@Param("limit") int limit);
+    List<Long> selectMarketIdsForSettlementRetry(
+            @Param("pendingThreshold") LocalDateTime pendingThreshold,
+            @Param("limit") int limit
+    );
 
     long countSettlementDetailsBySettlementId(@Param("settlementId") long settlementId);
 
     long countNonSuccessSettlementDetails(@Param("settlementId") long settlementId);
 
-    long countRetryableSettlementDetails(@Param("settlementId") long settlementId);
+    long countRetryableSettlementDetails(
+            @Param("settlementId") long settlementId,
+            @Param("pendingThreshold") LocalDateTime pendingThreshold
+    );
 
     long countSettledLoserPredictions(
             @Param("marketId") long marketId,
@@ -431,4 +445,21 @@ public interface MarketMapper {
     long countDistinctProblemMarketsForAdmin(@Param("pendingThreshold") LocalDateTime pendingThreshold);
 
     AdminMarketStatusCountsRow selectAdminMarketStatusCounts(@Param("now") LocalDateTime now);
+
+    int insertMarketOutboxEvents(@Param("events") List<MarketOutboxEvent> events);
+
+    int deleteMarketOutboxEventsBefore(
+            @Param("threshold") LocalDateTime threshold,
+            @Param("limit") int limit
+    );
+
+    MarketRefundDetail selectRefundDetailByIdempotencyKeyForUpdate(@Param("idempotencyKey") String idempotencyKey);
+
+    MarketSettlementDetail selectSettlementDetailByIdempotencyKeyForUpdate(@Param("idempotencyKey") String idempotencyKey);
+
+    /** 여러 market을 ID 오름차순으로 잠근다. 존재하는(삭제되지 않은) market ID를 반환한다. */
+    List<Long> lockMarketsByIdsInOrder(@Param("marketIds") List<Long> marketIds);
+
+    /** 결과 배치의 정산 detail을 한 번에 잠근다 (멱등성 키 순서, ASYNC_POINT_FLOW.md §17.6). */
+    List<MarketSettlementDetail> lockSettlementDetailsByIdempotencyKeys(@Param("idempotencyKeys") List<String> idempotencyKeys);
 }

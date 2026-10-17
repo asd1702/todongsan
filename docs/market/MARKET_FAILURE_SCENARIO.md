@@ -907,6 +907,37 @@ Prediction POINT_PENDING 저장
 NOT_FOUND는 자동 재차감하지 않고 Prediction FAILED 처리한다.
 ```
 
+#### 5-6-1. FAILED 처리 전 차감 펜싱
+
+> 설계 근거: `docs/architecture/ASYNC_POINT_FLOW.md` §12.6
+
+추가 위험 시나리오 (늦게 도착한 spend):
+
+```text
+spend 요청 timeout → POINT_UNKNOWN
+→ 3분 뒤 대사: 거래 조회 NOT_FOUND → Prediction FAILED (종결)
+→ 지연된 spend가 Member-Point에서 처리됨
+→ 포인트만 차감되고 Prediction은 없음
+```
+
+정책:
+
+```text
+NOT_FOUND이면 Prediction을 FAILED로 바꾸기 전에
+Member-Point 차감 펜싱(POST /internal/api/v1/points/spend/fence)을 같은 Idempotency-Key로 호출한다.
+
+펜싱 결과 FAILED    → Prediction FAILED (fail_reason = MP의 fail_reason, 보통 POINT_SPEND_FENCED. 이후 같은 키의 spend는 POINT_SPEND_FENCED로 거절되어 차감 불가)
+펜싱 결과 PROCESSED → spend가 먼저 처리된 것. 가격 확정 트랜잭션 재시도 후 Prediction CONFIRMED
+펜싱 호출 timeout/5xx → Prediction 상태 유지 (POINT_UNKNOWN), 다음 대사에서 재시도
+```
+
+| 항목 | 내용 |
+|---|---|
+| 자동 재차감 | 여전히 금지 (펜싱은 실패를 확정할 뿐 차감하지 않는다) |
+| 보상 트랜잭션 | 없음 (차감 자체를 막으므로 환불이 필요 없다) |
+| 새 PredictionStatus | 없음 |
+| 관련 ErrorCode | `POINT_SPEND_FENCED` (Member-Point, 409) |
+
 ---
 
 ### 5-7. closeAt 이후 예측 차감 대사
@@ -1223,7 +1254,8 @@ Header Idempotency-Key는 새로운 batch 요청 추적용 키를 사용할 수 
 
 ```text
 1. Market과 진행 중 settlement를 조회한다.
-2. FAILED 또는 UNKNOWN detail만 재시도 대상으로 조회한다.
+2. FAILED, UNKNOWN 또는 3분 이상 PENDING인 detail만 재시도 대상으로 조회한다 (환불 재시도와 같은 기준).
+   정산 준비 커밋 후 Member-Point 호출 전에 서버가 종료되어 PENDING으로 남은 detail도 복구 대상이 된다.
 3. DB 트랜잭션을 종료한 뒤 Member-Point 정산 batch API를 호출한다.
 4. Header Idempotency-Key는 retry UUID 기반 새 값을 사용한다.
 5. items[].idempotencyKey는 기존 detail.idempotency_key를 그대로 사용한다.

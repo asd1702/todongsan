@@ -1,17 +1,17 @@
 spring:
+  flyway:
+    enabled: true
   datasource:
-    url: jdbc:mysql://localhost:3307/market_test?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Seoul&rewriteBatchedStatements=true
+    url: ${MARKET_IT_DB_URL:jdbc:mysql://localhost:13308/market_test?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Seoul&rewriteBatchedStatements=true}
     driver-class-name: com.mysql.cj.jdbc.Driver
-    username: root
-    password: "1234"
+    username: ${MARKET_IT_DB_USERNAME:market_test_user}
+    password: ${MARKET_IT_DB_PASSWORD:market-test-local-password}
     hikari:
       maximum-pool-size: 60
       connection-timeout: 60000
-  # MySQL integration tests use an isolated schema and must never target the local service schema.
   sql:
     init:
-      mode: always
-      schema-locations: classpath:schema.sql
+      mode: never
 
 mybatis:
   mapper-locations: classpath:/mapper/**/*.xml

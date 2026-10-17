@@ -1,8 +1,21 @@
 spring:
   application:
     name: market-service
+  flyway:
+    enabled: true
+    baseline-on-migrate: ${FLYWAY_BASELINE_ON_MIGRATE:false}
   profiles:
     default: local
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: market-service
+      auto-offset-reset: earliest
+      # 결과 반영 배치 크기 상한 (ASYNC_POINT_FLOW.md §16.1 Q4, §17.11). poll은 도착한 만큼만 가져온다
+      max-poll-records: ${KAFKA_MAX_POLL_RECORDS:500}
+    listener:
+      # 파티션 수(3)와 맞춘다. 실제 병렬도 = min(concurrency, 파티션 수) (ASYNC_POINT_FLOW.md §3.3)
+      concurrency: ${KAFKA_LISTENER_CONCURRENCY:3}
   cloud:
     openfeign:
       client:
@@ -23,6 +36,8 @@ client:
     base-url: ${MEMBER_POINT_SERVICE_URL:http://localhost:8080}
     connect-timeout-millis: ${MEMBER_POINT_CONNECT_TIMEOUT_MILLIS:3000}
     read-timeout-millis: ${MEMBER_POINT_READ_TIMEOUT_MILLIS:5000}
+    # 예측 참여 차감만 따로 짧게. 서킷 브레이커는 호출이 끝나야 실패를 세므로 감지 시간·스레드 점유가 이 값에 비례한다 (docs/architecture/SPEND_CIRCUIT_BREAKER.md B7)
+    spend-read-timeout-millis: ${MEMBER_POINT_SPEND_READ_TIMEOUT_MILLIS:2000}
   insight:
     mode: ${INSIGHT_CLIENT_MODE:fake}
     base-url: ${INSIGHT_SERVICE_URL:http://localhost:8083}
@@ -33,6 +48,40 @@ mybatis:
     map-underscore-to-camel-case: true
 
 market:
+  prediction:
+    admission:
+      # 마켓별 동시 진행 예측 수 한도. 넘치면 즉시 503 SERVICE_UNAVAILABLE. 0이면 제한 없음 (docs/architecture/HOT_MARKET_ADMISSION.md §4, 묶음 확정과 함께 16: PREDICTION_BATCH_CONFIRM.md §5)
+      max-in-flight-per-market: ${MARKET_PREDICTION_MAX_IN_FLIGHT_PER_MARKET:16}
+      # 인스턴스 전체 동시 진행 예측 수 한도. 마켓 여러 개가 동시에 붐벼도 DB 커넥션 풀(10)을 다 쓰지 않게 한다. 0이면 제한 없음 (HOT_MARKET_ADMISSION.md §6, 묶음 확정과 함께 24: PREDICTION_BATCH_CONFIRM.md §5)
+      max-in-flight-total: ${MARKET_PREDICTION_MAX_IN_FLIGHT_TOTAL:24}
+    # 같은 마켓 예측 확정을 묶어 잠금·commit을 나눠 쓴다 (docs/architecture/PREDICTION_BATCH_CONFIRM.md, 리더-팔로워)
+    batch-confirm:
+      enabled: ${MARKET_PREDICTION_BATCH_CONFIRM_ENABLED:true}
+      max-batch-size: ${MARKET_PREDICTION_BATCH_CONFIRM_MAX_BATCH_SIZE:50}
+      wait-timeout-ms: ${MARKET_PREDICTION_BATCH_CONFIRM_WAIT_TIMEOUT_MS:10000}
+  member-point:
+    # 예측 참여 차감 서킷 브레이커. 끄면 기존 동작 (before/after 측정, 롤백용. 설정은 아래 resilience4j.circuitbreaker.instances.memberPointSpend)
+    spend-circuit-breaker-enabled: ${MARKET_SPEND_CIRCUIT_BREAKER_ENABLED:true}
+  point-transport:
+    # sync: Feign 배치 호출 / async: outbox + Debezium CDC (현재 환불만 적용, docs/architecture/ASYNC_POINT_FLOW.md)
+    mode: ${MARKET_POINT_TRANSPORT_MODE:sync}
+    # async 요청 토픽(market.refund-requests, market.settlement-payout-requests)의 Kafka key: member_id | market_id
+    request-key: ${MARKET_POINT_REQUEST_KEY:member_id}
+    # 정산 지급 요청 형식: item(승자 1명 = 이벤트 1개, v1) | chunk(최대 chunk-size명 = 이벤트 1개, v2, key = {marketId}:{chunkNo}) (ASYNC_POINT_FLOW.md §18)
+    # chunk 전환 전에 MP가 v2를 받도록 먼저 배포한다 (§8.5)
+    settlement-request-format: ${MARKET_SETTLEMENT_REQUEST_FORMAT:item}
+    settlement-request-chunk-size: ${MARKET_SETTLEMENT_REQUEST_CHUNK_SIZE:500}
+  kafka:
+    point-results:
+      # Member-Point 결과 이벤트 consumer. 전송 방식과 별도로 켠다 (sync로 되돌려도 이미 나간 요청의 결과는 반영해야 한다)
+      enabled: ${MARKET_POINT_RESULTS_CONSUMER_ENABLED:false}
+      topic: memberpoint.point-results
+      # 반영 트랜잭션 1개의 최대 건수. 묶음 결과(v2)는 레코드 하나에 여러 건이라 레코드 수가 아니라 건수로 자른다 (ASYNC_POINT_FLOW.md §18.5)
+      max-batch-items: ${MARKET_POINT_RESULTS_MAX_BATCH_ITEMS:500}
+      # DB 장애(실패 직후 SELECT 1도 실패) 시 DLT 대신 기다린다. 한 번의 대기는 max.poll.interval.ms(5분)보다 짧아야 한다 (ASYNC_POINT_FLOW.md §16.1 Q3)
+      db-unavailable:
+        retry-interval-ms: ${MARKET_POINT_RESULTS_DB_RETRY_INTERVAL_MS:30000}
+        max-wait-ms: ${MARKET_POINT_RESULTS_DB_MAX_WAIT_MS:3600000}
   scheduler:
     prediction-reconciliation:
       enabled: true
@@ -46,7 +95,28 @@ market:
       enabled: true
       fixed-delay-ms: 180000
       limit: 50
+    outbox-cleanup:
+      enabled: ${MARKET_OUTBOX_CLEANUP_SCHEDULER_ENABLED:true}
+      retention-days: 7
+      batch-size: 1000
+      max-batches: 10
+      fixed-delay-ms: 3600000
     reputation-update:
       enabled: ${MARKET_REPUTATION_UPDATE_SCHEDULER_ENABLED:true}
       fixed-delay-ms: ${MARKET_REPUTATION_UPDATE_SCHEDULER_FIXED_DELAY_MS:180000}
       limit: ${MARKET_REPUTATION_UPDATE_SCHEDULER_LIMIT:50}
+
+# 예측 참여 차감(Market → Member-Point spend) 서킷 브레이커 (docs/architecture/SPEND_CIRCUIT_BREAKER.md §2)
+# 실패: 타임아웃·5xx·연결 실패·결과 불명 + 1초 넘는 호출. 잔액 부족 등 업무 실패는 성공으로 센다
+resilience4j:
+  circuitbreaker:
+    instances:
+      memberPointSpend:
+        sliding-window-type: TIME_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 20
+        failure-rate-threshold: 50
+        slow-call-duration-threshold: 1s
+        slow-call-rate-threshold: 50
+        wait-duration-in-open-state: 5s
+        permitted-number-of-calls-in-half-open-state: 5

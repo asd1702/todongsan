@@ -22,7 +22,7 @@ class MemberPointInternalFeignClientTest {
 
     @Test
     void feignClientUsesInternalPointEndpoints() throws NoSuchMethodException {
-        assertThat(postMapping("spend", String.class, Long.class, MemberPointHttpDtos.SpendRequest.class))
+        assertThat(postMapping("spend", feign.Request.Options.class, String.class, Long.class, MemberPointHttpDtos.SpendRequest.class))
                 .containsExactly("/internal/api/v1/points/spend");
         assertThat(getMapping("getTransactionStatus", String.class))
                 .containsExactly("/internal/api/v1/points/transactions");
@@ -42,13 +42,14 @@ class MemberPointInternalFeignClientTest {
     void spendRequestIncludesRequiredHeaders() throws NoSuchMethodException {
         Method method = MemberPointInternalFeignClient.class.getMethod(
                 "spend",
+                feign.Request.Options.class,
                 String.class,
                 Long.class,
                 MemberPointHttpDtos.SpendRequest.class
         );
 
-        assertThat(requestHeaderValue(method.getParameterAnnotations()[0])).isEqualTo("Idempotency-Key");
-        assertThat(requestHeaderValue(method.getParameterAnnotations()[1])).isEqualTo("X-Member-Id");
+        assertThat(requestHeaderValue(method.getParameterAnnotations()[1])).isEqualTo("Idempotency-Key");
+        assertThat(requestHeaderValue(method.getParameterAnnotations()[2])).isEqualTo("X-Member-Id");
     }
 
     private String[] postMapping(String methodName, Class<?>... parameterTypes) throws NoSuchMethodException {

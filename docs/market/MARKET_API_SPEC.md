@@ -2159,7 +2159,7 @@ items[].idempotencyKey:
 POST /api/v1/admin/markets/{marketId}/settlements/retry
 ```
 
-이미 생성된 `market_settlement`와 `market_settlement_detail` 중 실패 또는 처리 불명확 상태만 재시도한다.
+이미 생성된 `market_settlement`와 `market_settlement_detail` 중 `FAILED`, `UNKNOWN` 또는 3분 이상 `PENDING`으로 남은 detail만 재시도한다 (환불 재시도와 같은 기준).
 이 API는 새 정산 row를 만들지 않고, 정산 금액을 다시 계산하지 않는다.
 
 ### 실행 조건
@@ -2168,12 +2168,20 @@ POST /api/v1/admin/markets/{marketId}/settlements/retry
 market.status = SETTLEMENT_IN_PROGRESS
 market_settlement.status = IN_PROGRESS
 market_settlement_detail.status IN ('FAILED', 'UNKNOWN')
+OR (
+    market_settlement_detail.status = 'PENDING'
+    AND market_settlement_detail.updated_at <= now - 3 minutes
+)
 ```
+
+3분 이상 `PENDING`을 포함하는 이유: 정산 준비 트랜잭션 커밋 후 Member-Point 호출 전에 서버가 종료되면 detail이 `PENDING`으로 남는다. async 모드(`docs/architecture/ASYNC_POINT_FLOW.md` §14)에서는 전달 지연·커넥터 중단으로 정체될 수 있다.
 
 재시도 대상 detail이 없을 때:
 
 - 모든 detail이 `SUCCESS`이면 정산 완료 보정으로 `market_settlement.status = COMPLETED`, `market.status = SETTLED`로 전환한다.
-- `PENDING` 등 `SUCCESS`가 아닌 detail이 남아 있으면 `MARKET_INVALID_SETTLEMENT_DATA`를 반환한다.
+- 3분이 지나지 않은 `PENDING`(처리 중) 등 `SUCCESS`가 아닌 detail이 남아 있으면 `MARKET_INVALID_SETTLEMENT_DATA`를 반환한다.
+
+async 모드에서는 Member-Point 정산 batch API를 호출하지 않는다. 재시도 대상 detail을 `PENDING`으로 되돌리고, 같은 item 멱등성 키 + 새 eventId로 `market_outbox_event`에 다시 기록한 뒤 `SETTLEMENT_IN_PROGRESS`를 응답한다 (`ASYNC_POINT_FLOW.md` §6.1 R5).
 
 ### 재시도 요청 규칙
 
@@ -3166,12 +3174,17 @@ POST /internal/api/v1/markets/settlements/retry-failed?limit=100
 ```
 
 자동 Scheduler는 내부 HTTP endpoint를 호출하지 않고, `MarketSettlementService.retryFailedSettlements(limit)`를 직접 호출한다.
+async 모드에서는 자동 Scheduler가 실행을 skip한다 (재시도는 Kafka consumer가 담당, `ASYNC_POINT_FLOW.md` §6.2).
 
 대상:
 
 ```text
 MarketStatus = SETTLEMENT_IN_PROGRESS
 market_settlement_detail.status IN ('FAILED', 'UNKNOWN')
+OR (
+    market_settlement_detail.status = 'PENDING'
+    AND market_settlement_detail.updated_at <= now - 3 minutes
+)
 ```
 
 처리:

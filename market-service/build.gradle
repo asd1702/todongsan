@@ -33,7 +33,13 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.cloud:spring-cloud-starter-openfeign'
+    // 예측 참여 차감 서킷 브레이커 (docs/architecture/SPEND_CIRCUIT_BREAKER.md). 버전은 Spring Cloud BOM(2.2.x)에 맡긴다. 지정하면 spring6 모듈과 버전이 섞인다
+    implementation 'io.github.resilience4j:resilience4j-spring-boot3'
+    implementation 'io.github.resilience4j:resilience4j-micrometer'
+    implementation 'org.springframework.kafka:spring-kafka'
     implementation 'org.mybatis.spring.boot:mybatis-spring-boot-starter:3.0.5'
+    implementation 'org.flywaydb:flyway-core'
+    runtimeOnly 'org.flywaydb:flyway-mysql'
     implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.16'
     compileOnly 'org.projectlombok:lombok'
     runtimeOnly 'com.mysql:mysql-connector-j'
@@ -41,6 +47,7 @@ dependencies {
     annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'org.mybatis.spring.boot:mybatis-spring-boot-starter-test:3.0.5'
+    testImplementation 'com.networknt:json-schema-validator:1.5.6'
     testCompileOnly 'org.projectlombok:lombok'
     testRuntimeOnly 'com.h2database:h2'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
@@ -49,4 +56,18 @@ dependencies {
 
 tasks.named('test') {
     useJUnitPlatform()
+}
+
+tasks.withType(Test).configureEach {
+    if (System.getProperty("bench.enabled") == "true") {
+        testLogging {
+            showStandardStreams = true
+        }
+    }
+
+    System.getProperties()
+            .findAll { key, value -> key.toString().startsWith("bench.") }
+            .each { key, value ->
+                systemProperty key.toString(), value
+            }
 }

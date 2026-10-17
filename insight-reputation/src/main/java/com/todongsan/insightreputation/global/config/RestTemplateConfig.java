@@ -3,6 +3,7 @@ package com.todongsan.insightreputation.global.config;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.http.converter.StringHttpMessageConverter;
@@ -16,6 +17,7 @@ import java.util.List;
 public class RestTemplateConfig {
 
     @Bean
+    @Primary
     public RestTemplate restTemplate() {
         RestTemplate restTemplate = new RestTemplate();
 
@@ -30,6 +32,27 @@ public class RestTemplateConfig {
             new MediaType("text", "plain", StandardCharsets.UTF_8)
         ));
 
+        restTemplate.getMessageConverters().add(0, converter);
+        return restTemplate;
+    }
+
+    @Bean
+    @Qualifier("marketRestTemplate")
+    public RestTemplate marketRestTemplate(
+            @org.springframework.beans.factory.annotation.Value("${client.market.connect-timeout-ms:500}") int connectTimeoutMs,
+            @org.springframework.beans.factory.annotation.Value("${client.market.read-timeout-ms:1000}") int readTimeoutMs) {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(connectTimeoutMs);
+        factory.setReadTimeout(readTimeoutMs);
+
+        RestTemplate restTemplate = new RestTemplate(factory);
+        MappingJackson2HttpMessageConverter converter = new MappingJackson2HttpMessageConverter();
+        converter.setDefaultCharset(StandardCharsets.UTF_8);
+        converter.setSupportedMediaTypes(List.of(
+            MediaType.APPLICATION_JSON,
+            new MediaType("text", "html", StandardCharsets.UTF_8),
+            new MediaType("text", "plain", StandardCharsets.UTF_8)
+        ));
         restTemplate.getMessageConverters().add(0, converter);
         return restTemplate;
     }

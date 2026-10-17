@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://todongsan/contracts/events/market.settlement-payout-requests.v2.schema.json",
+  "title": "market.settlement-payout-requests v2",
+  "description": "Market -> Member-Point 정산 지급 적립 요청 묶음 (ASYNC_POINT_FLOW.md §18). 승자 최대 chunk-size명당 이벤트 1개. Kafka key = {marketId}:{chunkNo}. 멱등성은 건별 idempotencyKey.",
+  "type": "object",
+  "required": ["eventId", "eventType", "schemaVersion", "occurredAt", "producer", "data"],
+  "properties": {
+    "eventId": { "type": "string", "format": "uuid" },
+    "eventType": { "type": "string", "const": "MARKET_SETTLEMENT_PAYOUT_REQUESTED" },
+    "schemaVersion": { "const": 2 },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601, offset 포함 (예: 2026-09-30T18:00:00.123+09:00)"
+    },
+    "producer": { "const": "market-service" },
+    "data": {
+      "type": "object",
+      "required": ["marketId", "chunkNo", "referenceType", "reason", "items"],
+      "properties": {
+        "marketId": { "type": "integer", "minimum": 1 },
+        "chunkNo": { "type": "integer", "minimum": 0, "description": "같은 발행 안에서 묶음 순번. 추적·key 분산용" },
+        "referenceType": { "const": "MARKET_PREDICTION" },
+        "reason": { "type": "string", "maxLength": 255 },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "type": "object",
+            "required": ["predictionId", "memberId", "amount", "referenceId", "idempotencyKey"],
+            "properties": {
+              "predictionId": { "type": "integer", "minimum": 1 },
+              "memberId": { "type": "integer", "minimum": 1 },
+              "amount": {
+                "type": "string",
+                "pattern": "^[0-9]+\\.[0-9]{2}$",
+                "description": "항상 양수. 방향(+/-)은 eventType이 결정한다."
+              },
+              "referenceId": { "type": "integer", "minimum": 1, "description": "predictionId와 같은 값" },
+              "idempotencyKey": {
+                "type": "string",
+                "maxLength": 150,
+                "pattern": "^MARKET_SETTLEMENT_REWARD:market:[0-9]+:prediction:[0-9]+:member:[0-9]+$"
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

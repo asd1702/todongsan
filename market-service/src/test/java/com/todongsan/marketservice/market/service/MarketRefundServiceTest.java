@@ -7,6 +7,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.todongsan.marketservice.global.config.PointTransportProperties;
 import com.todongsan.marketservice.global.exception.CustomException;
 import com.todongsan.marketservice.global.exception.errorcode.MarketErrorCode;
 import com.todongsan.marketservice.market.client.MemberPointClient;
@@ -23,6 +24,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 @ExtendWith(MockitoExtension.class)
 class MarketRefundServiceTest {
 
+    private static final PointTransportProperties SYNC = new PointTransportProperties(null, null);
+
     @Mock
     private MarketRefundTransactionService transactionService;
 
@@ -31,7 +34,7 @@ class MarketRefundServiceTest {
 
     @Test
     void retryFailedRefundsReturnsEmptyCountsWhenNoTargetMarkets() {
-        MarketRefundService service = new MarketRefundService(transactionService, memberPointClient);
+        MarketRefundService service = new MarketRefundService(transactionService, memberPointClient, SYNC);
         when(transactionService.selectMarketIdsForRefundRetry(50)).thenReturn(List.of());
 
         RetryRefundBatchResponse response = service.retryFailedRefunds(50);
@@ -47,7 +50,7 @@ class MarketRefundServiceTest {
 
     @Test
     void retryFailedRefundsRetriesEachMarketAndAggregatesCounts() {
-        MarketRefundService service = spy(new MarketRefundService(transactionService, memberPointClient));
+        MarketRefundService service = spy(new MarketRefundService(transactionService, memberPointClient, SYNC));
         when(transactionService.selectMarketIdsForRefundRetry(4)).thenReturn(List.of(1L, 2L, 3L, 4L));
         doReturn(response(1L, RefundStatus.COMPLETED)).when(service).retryRefundMarket(1L);
         doReturn(response(2L, RefundStatus.IN_PROGRESS)).when(service).retryRefundMarket(2L);
@@ -73,7 +76,7 @@ class MarketRefundServiceTest {
 
     @Test
     void retryFailedRefundsContinuesAfterUnexpectedException() {
-        MarketRefundService service = spy(new MarketRefundService(transactionService, memberPointClient));
+        MarketRefundService service = spy(new MarketRefundService(transactionService, memberPointClient, SYNC));
         when(transactionService.selectMarketIdsForRefundRetry(2)).thenReturn(List.of(1L, 2L));
         doThrow(new IllegalStateException("boom")).when(service).retryRefundMarket(1L);
         doReturn(response(2L, RefundStatus.COMPLETED)).when(service).retryRefundMarket(2L);

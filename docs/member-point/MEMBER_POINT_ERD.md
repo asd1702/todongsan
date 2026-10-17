@@ -12,6 +12,7 @@
 | `member` | 회원 정보, 포인트 잔액 |
 | `oauth_token` | 카카오 OAuth 토큰 (access/refresh) |
 | `point_history` | 포인트 적립/차감/정산 이력 |
+| `point_outbox_event` | Market으로 보낼 포인트 적립 결과 이벤트 outbox. Debezium CDC로 Kafka 발행 (도입 예정) |
 
 ---
 
@@ -88,6 +89,31 @@ CREATE INDEX idx_point_history_type ON point_history(type);
 CREATE INDEX idx_point_history_idempotency_key ON point_history(idempotency_key);
 CREATE INDEX idx_point_history_reference ON point_history(reference_type, reference_id);
 ```
+
+### 2-4. point_outbox_event
+
+> 도입 예정. 설계 근거와 이벤트 스키마는 `docs/architecture/ASYNC_POINT_FLOW.md` §8~§9를 따른다.
+
+Market 포인트 적립 요청 이벤트(`market.refund-requests`, `market.settlement-payout-requests`)를 처리한 트랜잭션에서, `point_history` 기록과 함께 결과 이벤트를 기록한다.
+Debezium Outbox Event Router가 `memberpoint.point-results` 토픽으로 발행한다.
+
+```sql
+CREATE TABLE point_outbox_event (
+    id              BIGINT          NOT NULL AUTO_INCREMENT,
+    event_id        CHAR(36)        NOT NULL,
+    aggregate_type  VARCHAR(50)     NOT NULL,   -- 'point-results' → memberpoint.point-results
+    aggregate_id    VARCHAR(50)     NOT NULL,   -- Kafka message key = market_id
+    event_type      VARCHAR(80)     NOT NULL,   -- POINT_CREDITED, POINT_CREDIT_FAILED
+    payload         JSON            NOT NULL,   -- envelope 전체 (contracts/events/memberpoint.point-results.v1.schema.json)
+    created_at      DATETIME(3)     NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_point_outbox_event_event_id (event_id),
+    INDEX idx_point_outbox_event_created_at (created_at)
+);
+```
+
+- INSERT만 하고 UPDATE하지 않는다. 일정 기간 보존 후 주기적으로 삭제한다.
+- 이미 처리된 요청(`ALREADY_PROCESSED`)을 다시 받아도 결과 이벤트를 다시 기록한다. Market 쪽 반영은 멱등하다.
 
 ---
 

@@ -239,6 +239,7 @@ FOR UPDATE;
 | `market_refund_detail` | 무효 처리 시 사용자별 환불 상세 |
 | `market_reputation_update` | 정산 완료 후 Insight-Reputation Service로 prediction accuracy update를 전송하기 위한 outbox task |
 | `market_comment` | Market 상세의 단일 depth 댓글. soft delete 적용 |
+| `market_outbox_event` | Member-Point로 보낼 포인트 적립 요청 이벤트 outbox. Debezium CDC로 Kafka 발행 (도입 예정) |
 
 ---
 
@@ -581,7 +582,7 @@ contract_quantity_after
 구현 시 migration 후보:
 
 ```text
-docs/market/sql/006_add_market_price_history_v4_columns.sql
+market-service/src/main/resources/db/migration/V1__baseline.sql
 ```
 
 이번 3차 문서 정리에서는 migration 파일을 실제로 추가하지 않는다.
@@ -904,6 +905,49 @@ Member-Point Service DB와 직접 FK를 맺지 않는다.
 content 길이 500자 제한은 API validation으로 적용한다.
 댓글 수정 API가 없으므로 updated_at은 생성 시각과 동일하게 시작한다.
 ```
+
+---
+
+## 6-11. market_outbox_event
+
+> 도입 예정. 설계 근거와 이벤트 스키마는 `docs/architecture/ASYNC_POINT_FLOW.md` §8~§9를 따른다.
+
+환불/정산 detail 생성과 같은 트랜잭션에서 Member-Point로 보낼 포인트 적립 요청 이벤트를 기록한다.
+Debezium Outbox Event Router가 binlog의 INSERT를 읽어 `aggregate_type`에 따라 `market.refund-requests` / `market.settlement-payout-requests` 토픽으로 발행한다.
+애플리케이션은 Kafka에 직접 발행하지 않는다.
+
+```sql
+CREATE TABLE market_outbox_event (
+    id              BIGINT          NOT NULL AUTO_INCREMENT,
+    event_id        CHAR(36)        NOT NULL,
+    aggregate_type  VARCHAR(50)     NOT NULL,
+    -- 토픽 라우팅 값 (market.{aggregate_type}). 'refund-requests' → market.refund-requests, 'settlement-payout-requests' → market.settlement-payout-requests
+
+    aggregate_id    VARCHAR(50)     NOT NULL,
+    -- Kafka message key. 기본 member_id, 키 전략 실험 시 market_id
+
+    event_type      VARCHAR(80)     NOT NULL,
+    -- MARKET_REFUND_REQUESTED, MARKET_SETTLEMENT_PAYOUT_REQUESTED
+
+    payload         JSON            NOT NULL,
+    -- envelope 전체 (contracts/events/market.{aggregate_type}.v1.schema.json)
+
+    created_at      DATETIME(3)     NOT NULL,
+
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_market_outbox_event_event_id (event_id),
+    INDEX idx_market_outbox_event_created_at (created_at)
+);
+```
+
+관계:
+
+```text
+payload.data.idempotencyKey -> market_refund_detail.idempotency_key 또는 market_settlement_detail.idempotency_key 논리 참조
+```
+
+`market_reputation_update`와 달리 전송 상태(status, attempt_no)를 두지 않는다. 전송 보장과 재시도는 Debezium과 Kafka가 담당하고, 처리 결과는 Member-Point 결과 이벤트로 detail에 반영한다.
+row는 INSERT만 하고 UPDATE하지 않는다. 일정 기간 보존 후 주기적으로 삭제한다.
 
 ---
 

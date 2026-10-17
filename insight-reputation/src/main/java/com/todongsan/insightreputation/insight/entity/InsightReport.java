@@ -8,7 +8,9 @@ import lombok.AccessLevel;
 import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
+import org.hibernate.annotations.JdbcTypeCode;
 
+import java.sql.Types;
 import java.time.LocalDateTime;
 
 /**
@@ -49,19 +51,19 @@ public class InsightReport extends BaseEntity {
     @Column(name = "status", nullable = false, length = 20)
     private InsightReportStatus status = InsightReportStatus.PENDING;
 
-    @Lob
-    @Column(name = "summary")
+    @JdbcTypeCode(Types.LONGVARCHAR)
+    @Column(name = "summary", columnDefinition = "TEXT")
     private String summary;
 
     @Column(name = "analysis_data", columnDefinition = "JSON")
     private String analysisData;
 
-    @Lob
-    @Column(name = "raw_prompt")
+    @JdbcTypeCode(Types.LONGVARCHAR)
+    @Column(name = "raw_prompt", columnDefinition = "TEXT")
     private String rawPrompt;
 
-    @Lob
-    @Column(name = "failed_reason")
+    @JdbcTypeCode(Types.LONGVARCHAR)
+    @Column(name = "failed_reason", columnDefinition = "TEXT")
     private String failedReason;
 
     @Column(name = "processing_started_at")
@@ -73,8 +75,8 @@ public class InsightReport extends BaseEntity {
     @Column(name = "requested_by", nullable = false)
     private Long requestedBy;
 
-    @Lob
-    @Column(name = "report_content")
+    @JdbcTypeCode(Types.LONGVARCHAR)
+    @Column(name = "report_content", columnDefinition = "TEXT")
     private String reportContent;
 
     @Column(name = "generated_at")

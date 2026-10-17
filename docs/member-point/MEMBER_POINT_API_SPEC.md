@@ -736,8 +736,10 @@ X-Member-Id: {memberId}
 2. point_history에서 idempotency_key 조회
    → 없으면 신규 요청 → 정상 처리
    → 있으면 request_hash 비교
-      동일 → 기존 처리 결과 반환 (status=SUCCEEDED → 200, status=FAILED → 409 POINT_INSUFFICIENT)
+      동일 → 기존 처리 결과 반환 (status=SUCCEEDED → 200,
+              status=FAILED → fail_reason=POINT_SPEND_FENCED면 409 POINT_SPEND_FENCED (3-5 펜싱), 그 외 409 POINT_INSUFFICIENT)
       불일치 → IDEMPOTENCY_KEY_CONFLICT (409)
+   → 조회 후 펜싱이 먼저 커밋되면 7의 INSERT가 idempotency_key UNIQUE 위반으로 실패하고, 6의 차감도 함께 롤백된다
 3. amount 유효성 확인
    → amount <= 0이면 POINT_INVALID_AMOUNT (400)
 4. referenceType / type 유효성 확인
@@ -789,6 +791,7 @@ X-Member-Id: {memberId}
 | `POINT_INSUFFICIENT` | point_balance 부족 |
 | `POINT_INVALID_AMOUNT` | amount <= 0 |
 | `POINT_INVALID_REFERENCE_TYPE` | 유효하지 않은 referenceType |
+| `POINT_SPEND_FENCED` | 대사가 펜싱한 키로 요청 (3-5). 차감하지 않음 |
 
 ---
 
@@ -1030,6 +1033,83 @@ items 순회하며 각 건에 대해:
 | `INVALID_REQUEST` | Header `Idempotency-Key` 값이 body의 settlementId/refundId와 다름 |
 
 > item별 `amount <= 0`(`POINT_INVALID_AMOUNT`), `MEMBER_NOT_FOUND`, `POINT_INVALID_REFERENCE_TYPE`, `IDEMPOTENCY_KEY_CONFLICT`는 요청 전체를 막지 않고 해당 item의 `results[].status = FAILED` + `errorCode`로만 표시된다 (`docs/member-point/MEMBER_POINT_ERROR_CODE.md` 7절 참조).
+
+---
+
+### 3-5. Market 예측 차감 펜싱
+
+```
+POST /internal/api/v1/points/spend/fence
+```
+
+> 설계 근거는 `docs/architecture/ASYNC_POINT_FLOW.md` §12.6을 따른다.
+
+Market 예측 차감 대사에서 거래 조회 결과가 `NOT_FOUND`일 때, prediction을 `FAILED`로 종결하기 **전에** 호출한다.
+해당 `Idempotency-Key`에 실패 기록을 먼저 남겨, 지연되어 늦게 도착한 `spend`가 차감하지 못하게 한다.
+포인트를 차감하거나 적립하지 않는다.
+
+**인증**: 불필요 (내부 서비스 간 호출)
+
+**Request Header**
+
+| Header | 필수 | 설명 |
+|---|---|---|
+| `Idempotency-Key` | Y | 펜싱할 차감 요청의 키. `market_prediction.point_spend_idempotency_key` 값을 그대로 사용 |
+
+**Request Body** — 원래 `POST /internal/api/v1/points/spend` 요청과 **같은 내용**을 보낸다 (request_hash가 같아야 한다).
+
+```json
+{
+  "memberId": 1,
+  "type": "SPEND_MARKET",
+  "amount": 100.00,
+  "referenceType": "MARKET_PREDICTION",
+  "referenceId": 1001,
+  "reason": "Market 예측 참여"
+}
+```
+
+**처리**
+
+| 상황 | 동작 | 응답 status |
+|---|---|---|
+| 키에 해당하는 `point_history` 없음 | `status = FAILED`, `fail_reason = POINT_SPEND_FENCED`, 잔액 변경 없이 기록 | `FAILED` |
+| 이미 `SUCCEEDED` 기록 있음 (spend가 먼저 처리됨) | 변경 없음 | `PROCESSED` |
+| 이미 `FAILED` 기록 있음 (잔액 부족 또는 이전 펜싱) | 변경 없음 | `FAILED` |
+| 펜싱과 spend가 동시에 실행 | `point_history.idempotency_key` UNIQUE로 하나만 기록된다. 펜싱 INSERT가 충돌하면 기존 기록을 다시 조회해 반환 | 먼저 커밋된 쪽 |
+
+**Response 200** — `3-1. 거래 상태 조회`와 같은 `data` 형식이다.
+
+```json
+{
+  "success": true,
+  "errorCode": null,
+  "message": null,
+  "data": {
+    "idempotencyKey": "MARKET_PREDICTION_SPEND:market:7:member:1:attempt:1",
+    "status": "FAILED",
+    "memberId": 1,
+    "type": "SPEND_MARKET",
+    "amount": "100.00",
+    "referenceType": "MARKET_PREDICTION",
+    "referenceId": 1001,
+    "failReason": "POINT_SPEND_FENCED",
+    "balanceSnapshot": "50.00",
+    "createdAt": "2026-05-28T10:03:00"
+  },
+  "timestamp": "2026-05-28T10:03:00"
+}
+```
+
+**펜싱 이후의 spend**: 같은 키로 `POST /internal/api/v1/points/spend`가 도착하면 차감하지 않고 `POINT_SPEND_FENCED`(409)로 거절한다.
+
+**Error Codes**
+
+| 에러 코드 | 상황 |
+|---|---|
+| `IDEMPOTENCY_KEY_REQUIRED` | Header `Idempotency-Key` 누락 |
+| `IDEMPOTENCY_KEY_CONFLICT` | 같은 키의 기존 기록과 요청 내용(request_hash)이 다름 |
+| `MEMBER_NOT_FOUND` | memberId에 해당하는 회원 없음 (`point_history.member_id` FK) |
 
 ---
 

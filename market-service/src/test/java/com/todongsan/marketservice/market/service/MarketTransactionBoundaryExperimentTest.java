@@ -45,6 +45,10 @@ class MarketTransactionBoundaryExperimentTest {
     @BeforeEach
     void setUp() {
         assertThat(jdbc.queryForObject("SELECT DATABASE()", String.class)).isEqualTo("market_test");
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM flyway_schema_history WHERE success = TRUE", Integer.class))
+                .isPositive();
+        clearMarketData();
         seedMarket(MARKET_A, OPTION_A_YES, OPTION_A_NO, PREDICTION_A);
         seedMarket(MARKET_B, OPTION_B_YES, OPTION_B_NO, PREDICTION_B);
     }
@@ -78,6 +82,19 @@ class MarketTransactionBoundaryExperimentTest {
             marketMapper.lockPredictionById(predictionId);
             sleep(EXTERNAL_DELAY_MS);
         });
+    }
+
+    private void clearMarketData() {
+        jdbc.update("DELETE FROM market_price_history");
+        jdbc.update("DELETE FROM market_reputation_update");
+        jdbc.update("DELETE FROM market_refund_detail");
+        jdbc.update("DELETE FROM market_void");
+        jdbc.update("DELETE FROM market_settlement_detail");
+        jdbc.update("DELETE FROM market_settlement");
+        jdbc.update("DELETE FROM market_prediction");
+        jdbc.update("DELETE FROM market_comment");
+        jdbc.update("DELETE FROM market_option");
+        jdbc.update("DELETE FROM market");
     }
 
     private void seedMarket(long marketId, long optionYes, long optionNo, long predictionId) {

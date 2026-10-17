@@ -10,6 +10,7 @@ import com.todongsan.marketservice.market.entity.Market;
 import com.todongsan.marketservice.market.entity.MarketPrediction;
 import com.todongsan.marketservice.market.entity.MarketRefundDetail;
 import com.todongsan.marketservice.market.entity.MarketVoid;
+import com.todongsan.marketservice.market.outbox.PointRequestOutboxWriter;
 import com.todongsan.marketservice.market.repository.MarketMapper;
 import com.todongsan.marketservice.market.type.MarketStatus;
 import com.todongsan.marketservice.market.type.RefundStatus;
@@ -32,9 +33,10 @@ public class MarketRefundTransactionService {
     private static final int RETRY_PENDING_THRESHOLD_MINUTES = 3;
 
     private final MarketMapper marketMapper;
+    private final PointRequestOutboxWriter pointRequestOutboxWriter;
 
     @Transactional
-    public MarketRefundPreparation prepareRefund(long marketId) {
+    public MarketRefundPreparation prepareRefund(long marketId, boolean publishPointRequests) {
         LocalDateTime now = LocalDateTime.now();
         Market market = marketMapper.lockMarketById(marketId);
         if (market == null) {
@@ -70,6 +72,9 @@ public class MarketRefundTransactionService {
         marketMapper.updateMarketVoidRefundStatus(marketVoid.getId(), RefundStatus.IN_PROGRESS, now);
 
         List<MarketRefundDetail> savedDetails = marketMapper.selectPendingRefundDetailsByVoidId(marketVoid.getId());
+        if (publishPointRequests) {
+            pointRequestOutboxWriter.appendRefundRequests(marketId, savedDetails, MarketRefundService.REASON, now);
+        }
         return new MarketRefundPreparation(marketId, marketVoid.getId(), savedDetails, false);
     }
 
@@ -128,7 +133,7 @@ public class MarketRefundTransactionService {
     }
 
     @Transactional
-    public MarketRefundRetryPreparation prepareRefundRetry(long marketId) {
+    public MarketRefundRetryPreparation prepareRefundRetry(long marketId, boolean publishPointRequests) {
         LocalDateTime now = LocalDateTime.now();
         Market market = marketMapper.lockMarketById(marketId);
         if (market == null) {
@@ -160,7 +165,62 @@ public class MarketRefundTransactionService {
             throw new CustomException(MarketErrorCode.MARKET_REFUND_NOT_ALLOWED);
         }
 
+        if (publishPointRequests) {
+            // async 수동 재시도(R5): 같은 item 멱등성 키 + 새 eventId로 outbox에 다시 기록한다.
+            for (MarketRefundDetail detail : retryDetails) {
+                updateRetryDetail(detail, TransactionItemStatus.PENDING, null, now);
+                marketMapper.markPredictionRefundPending(detail.getPredictionId(), null, now);
+            }
+            pointRequestOutboxWriter.appendRefundRequests(marketId, retryDetails, MarketRefundService.RETRY_REASON, now);
+            marketMapper.updateMarketVoidRefundStatus(marketVoid.getId(), RefundStatus.IN_PROGRESS, now);
+        }
         return new MarketRefundRetryPreparation(marketId, marketVoid.getId(), retryDetails, false);
+    }
+
+    /**
+     * Member-Point 결과 이벤트(memberpoint.point-results)를 환불 detail에 반영한다.
+     * SUCCESS는 종결 상태이므로 SQL 가드로 다시 바뀌지 않는다 (ASYNC_POINT_FLOW.md §13.3).
+     */
+    @Transactional
+    public PointResultApplyOutcome applyAsyncRefundResult(
+            long marketId,
+            String idempotencyKey,
+            boolean credited,
+            String errorCode
+    ) {
+        // 락 순서: market → detail → market_void (prepareRefund / prepareRefundRetry와 동일)
+        if (marketMapper.lockMarketById(marketId) == null) {
+            return PointResultApplyOutcome.DETAIL_NOT_FOUND;
+        }
+        AppliedPointResult applied = applyRefundResultItem(idempotencyKey, credited, errorCode);
+        if (applied.parentId() != null) {
+            completeRefundIfDone(applied.parentId());
+        }
+        return applied.outcome();
+    }
+
+    /**
+     * 호출자의 트랜잭션 안에서 환불 결과 1건을 detail에 반영한다.
+     * market row 잠금과 완료 판정은 호출자가 한다 (배치 반영, ASYNC_POINT_FLOW.md §16.1).
+     */
+    public AppliedPointResult applyRefundResultItem(String idempotencyKey, boolean credited, String errorCode) {
+        LocalDateTime now = LocalDateTime.now();
+        MarketRefundDetail detail = marketMapper.selectRefundDetailByIdempotencyKeyForUpdate(idempotencyKey);
+        if (detail == null) {
+            return AppliedPointResult.detailNotFound();
+        }
+        boolean updated = credited
+                ? markRetryRefundSuccess(detail, now)
+                : markRetryRefundFailed(detail, failureReason(errorCode, "MEMBER_POINT_FAILED"), now);
+        return new AppliedPointResult(
+                updated ? PointResultApplyOutcome.APPLIED : PointResultApplyOutcome.SKIPPED,
+                detail.getMarketVoidId()
+        );
+    }
+
+    /** 호출자의 트랜잭션 안에서 무효 처리의 환불 완료 여부를 판정한다. */
+    public void completeRefundIfDone(long voidId) {
+        resolveRefundStatus(voidId, LocalDateTime.now());
     }
 
     @Transactional(readOnly = true)

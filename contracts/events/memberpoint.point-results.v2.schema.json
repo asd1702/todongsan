@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://todongsan/contracts/events/memberpoint.point-results.v2.schema.json",
+  "title": "memberpoint.point-results v2",
+  "description": "Member-Point -> Market 묶음 요청(v2)의 적립 결과 (ASYNC_POINT_FLOW.md §18). MP 하위 트랜잭션 1개당 결과 이벤트 1개, 건별 결과를 담는다. Kafka key = market_id.",
+  "type": "object",
+  "required": ["eventId", "eventType", "schemaVersion", "occurredAt", "producer", "data"],
+  "properties": {
+    "eventId": { "type": "string", "format": "uuid" },
+    "eventType": { "type": "string", "const": "POINT_CREDIT_RESULTS" },
+    "schemaVersion": { "const": 2 },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "producer": { "const": "member-point-service" },
+    "data": {
+      "type": "object",
+      "required": ["requestEventId", "requestEventType", "marketId", "items"],
+      "properties": {
+        "requestEventId": { "type": "string", "format": "uuid" },
+        "requestEventType": { "type": "string", "enum": ["MARKET_SETTLEMENT_PAYOUT_REQUESTED"] },
+        "marketId": { "type": "integer", "minimum": 1 },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["predictionId", "memberId", "idempotencyKey", "amount", "status"],
+            "properties": {
+              "predictionId": { "type": "integer", "minimum": 1 },
+              "memberId": { "type": "integer", "minimum": 1 },
+              "idempotencyKey": { "type": "string", "maxLength": 150 },
+              "amount": { "type": "string", "pattern": "^[0-9]+\\.[0-9]{2}$" },
+              "status": {
+                "type": "string",
+                "enum": ["PROCESSED", "ALREADY_PROCESSED", "FAILED"],
+                "description": "PROCESSED / ALREADY_PROCESSED = v1 POINT_CREDITED, FAILED = v1 POINT_CREDIT_FAILED"
+              },
+              "balanceSnapshot": { "type": "string", "pattern": "^-?[0-9]+\\.[0-9]{2}$" },
+              "errorCode": {
+                "type": "string",
+                "description": "알려진 값: MEMBER_NOT_FOUND, POINT_INVALID_AMOUNT, POINT_INVALID_REFERENCE_TYPE, IDEMPOTENCY_KEY_CONFLICT. enum으로 고정하지 않는다."
+              }
+            },
+            "allOf": [
+              {
+                "if": { "properties": { "status": { "enum": ["PROCESSED", "ALREADY_PROCESSED"] } } },
+                "then": { "required": ["balanceSnapshot"] }
+              },
+              {
+                "if": { "properties": { "status": { "const": "FAILED" } } },
+                "then": { "required": ["errorCode"] }
+              }
+            ],
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

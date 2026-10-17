@@ -13,6 +13,7 @@ import com.todongsan.marketservice.market.client.MemberPointTransactionStatus;
 import com.todongsan.marketservice.market.client.MemberPointTransactionStatusResponse;
 import com.todongsan.marketservice.market.client.PointSpendCommand;
 import com.todongsan.marketservice.market.client.exception.MemberPointExternalException;
+import com.todongsan.marketservice.market.client.exception.MemberPointRejectedException;
 import com.todongsan.marketservice.market.client.exception.MemberPointTimeoutException;
 import com.todongsan.marketservice.market.client.exception.MemberPointUnavailableException;
 import com.todongsan.marketservice.market.client.exception.PointInsufficientException;
@@ -22,18 +23,19 @@ import com.todongsan.marketservice.market.client.http.MemberPointHttpDtos.Settle
 import com.todongsan.marketservice.market.client.http.MemberPointHttpDtos.SettlementItemResult;
 import com.todongsan.marketservice.market.client.http.MemberPointHttpDtos.TransactionStatusResponse;
 import feign.FeignException;
+import feign.Request;
 import feign.RetryableException;
 import feign.codec.DecodeException;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 @Component
-@RequiredArgsConstructor
 @ConditionalOnProperty(
         name = "client.member-point.mode",
         havingValue = "http"
@@ -46,10 +48,23 @@ public class HttpMemberPointClient implements MemberPointClient {
     private static final Pattern ERROR_CODE_PATTERN = Pattern.compile("\"errorCode\"\\s*:\\s*\"([^\"]+)\"");
 
     private final MemberPointInternalFeignClient feignClient;
+    /** 차감만 readTimeout을 짧게 (SPEND_CIRCUIT_BREAKER.md B7). 연결 타임아웃은 다른 호출과 같다 */
+    private final Request.Options spendOptions;
+
+    public HttpMemberPointClient(
+            MemberPointInternalFeignClient feignClient,
+            @Value("${client.member-point.connect-timeout-millis:3000}") long connectTimeoutMillis,
+            @Value("${client.member-point.spend-read-timeout-millis:2000}") long spendReadTimeoutMillis
+    ) {
+        this.feignClient = feignClient;
+        this.spendOptions = new Request.Options(
+                connectTimeoutMillis, TimeUnit.MILLISECONDS, spendReadTimeoutMillis, TimeUnit.MILLISECONDS, true);
+    }
 
     @Override
     public void spend(PointSpendCommand command) {
         MemberPointApiResponse<MemberPointHttpDtos.SpendResponse> response = call(() -> feignClient.spend(
+                spendOptions,
                 command.idempotencyKey(),
                 command.memberId(),
                 MemberPointHttpDtos.SpendRequest.from(command, SPEND_REASON)
@@ -59,7 +74,18 @@ public class HttpMemberPointClient implements MemberPointClient {
 
     @Override
     public MemberPointTransactionStatusResponse getTransactionStatus(String idempotencyKey) {
-        TransactionStatusResponse response = unwrap(call(() -> feignClient.getTransactionStatus(idempotencyKey)));
+        return toStatusResponse(unwrap(call(() -> feignClient.getTransactionStatus(idempotencyKey))));
+    }
+
+    @Override
+    public MemberPointTransactionStatusResponse fenceSpend(PointSpendCommand command) {
+        return toStatusResponse(unwrap(call(() -> feignClient.fenceSpend(
+                command.idempotencyKey(),
+                MemberPointHttpDtos.SpendRequest.from(command, SPEND_REASON)
+        ))));
+    }
+
+    private MemberPointTransactionStatusResponse toStatusResponse(TransactionStatusResponse response) {
         return new MemberPointTransactionStatusResponse(
                 response.idempotencyKey(),
                 transactionStatus(response.status()),
@@ -141,6 +167,9 @@ public class HttpMemberPointClient implements MemberPointClient {
         if (e.status() == 503) {
             return new MemberPointUnavailableException(failureMessage(e, "MEMBER_POINT_UNAVAILABLE"));
         }
+        if (e.status() >= 400 && e.status() < 500) {
+            return new MemberPointRejectedException(errorCode == null ? failureMessage(e, MEMBER_POINT_RESULT_UNKNOWN) : errorCode);
+        }
         return new MemberPointExternalException(errorCode == null ? failureMessage(e, MEMBER_POINT_RESULT_UNKNOWN) : errorCode);
     }
 
@@ -148,7 +177,10 @@ public class HttpMemberPointClient implements MemberPointClient {
         if (POINT_INSUFFICIENT.equals(errorCode)) {
             return new PointInsufficientException(errorCode);
         }
-        return new MemberPointExternalException(failureMessage(message, errorCode, MEMBER_POINT_RESULT_UNKNOWN));
+        // 성공 아님 + errorCode: MP가 업무 오류로 응답했다
+        return errorCode == null
+                ? new MemberPointExternalException(failureMessage(message, errorCode, MEMBER_POINT_RESULT_UNKNOWN))
+                : new MemberPointRejectedException(failureMessage(message, errorCode, MEMBER_POINT_RESULT_UNKNOWN));
     }
 
     private String extractErrorCode(String body) {

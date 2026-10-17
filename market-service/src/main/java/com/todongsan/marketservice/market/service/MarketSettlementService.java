@@ -1,5 +1,6 @@
 package com.todongsan.marketservice.market.service;
 
+import com.todongsan.marketservice.global.config.PointTransportProperties;
 import com.todongsan.marketservice.global.exception.CustomException;
 import com.todongsan.marketservice.market.client.MemberPointClient;
 import com.todongsan.marketservice.market.client.MemberPointSettlementBatchRequest;
@@ -25,18 +26,29 @@ import org.springframework.stereotype.Service;
 public class MarketSettlementService {
 
     private static final String REFERENCE_TYPE = "MARKET_PREDICTION";
-    private static final String REASON = "Market 정산 보상";
-    private static final String RETRY_REASON = "Market 정산 보상 재시도";
+    static final String REASON = "Market 정산 보상";
+    static final String RETRY_REASON = "Market 정산 보상 재시도";
 
     private final MarketSettlementTransactionService transactionService;
     private final MemberPointClient memberPointClient;
+    private final PointTransportProperties pointTransportProperties;
 
     public SettleMarketResponse settleMarket(long marketId) {
-        SettlementPreparation preparation = transactionService.prepareSettlement(marketId);
+        boolean async = pointTransportProperties.isAsync();
+        SettlementPreparation preparation = transactionService.prepareSettlement(marketId, async);
         if (preparation.completed()) {
             return preparation.toResponse(
                     MarketStatus.SETTLED,
                     SettlementStatus.COMPLETED,
+                    0,
+                    0
+            );
+        }
+        if (async) {
+            // 지급 요청은 outbox에 기록됨. 결과는 Member-Point 결과 이벤트로 반영된다.
+            return preparation.toResponse(
+                    MarketStatus.SETTLEMENT_IN_PROGRESS,
+                    SettlementStatus.IN_PROGRESS,
                     0,
                     0
             );
@@ -63,11 +75,21 @@ public class MarketSettlementService {
     }
 
     public SettleMarketResponse retryMarketSettlement(long marketId) {
-        SettlementRetryPreparation preparation = transactionService.prepareSettlementRetry(marketId);
+        boolean async = pointTransportProperties.isAsync();
+        SettlementRetryPreparation preparation = transactionService.prepareSettlementRetry(marketId, async);
         if (preparation.completed()) {
             return preparation.toResponse(
                     MarketStatus.SETTLED,
                     SettlementStatus.COMPLETED,
+                    0,
+                    0
+            );
+        }
+        if (async) {
+            // 재시도 요청은 outbox에 기록됨 (R5). 결과는 Member-Point 결과 이벤트로 반영된다.
+            return preparation.toResponse(
+                    MarketStatus.SETTLEMENT_IN_PROGRESS,
+                    SettlementStatus.IN_PROGRESS,
                     0,
                     0
             );

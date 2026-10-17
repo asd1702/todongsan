@@ -49,6 +49,7 @@ class MemberPointClientBeanConditionTest {
 
         @Override
         public MemberPointApiResponse<MemberPointHttpDtos.SpendResponse> spend(
+                feign.Request.Options options,
                 String idempotencyKey,
                 Long memberId,
                 MemberPointHttpDtos.SpendRequest request
@@ -59,6 +60,14 @@ class MemberPointClientBeanConditionTest {
         @Override
         public MemberPointApiResponse<MemberPointHttpDtos.TransactionStatusResponse> getTransactionStatus(
                 String idempotencyKey
+        ) {
+            return null;
+        }
+
+        @Override
+        public MemberPointApiResponse<MemberPointHttpDtos.TransactionStatusResponse> fenceSpend(
+                String idempotencyKey,
+                MemberPointHttpDtos.SpendRequest request
         ) {
             return null;
         }

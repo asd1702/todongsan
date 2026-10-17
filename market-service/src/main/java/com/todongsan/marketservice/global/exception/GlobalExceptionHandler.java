@@ -3,7 +3,9 @@ package com.todongsan.marketservice.global.exception;
 import com.todongsan.marketservice.global.exception.errorcode.CommonErrorCode;
 import com.todongsan.marketservice.global.exception.errorcode.ErrorCode;
 import com.todongsan.marketservice.global.response.ApiResponse;
+import com.todongsan.marketservice.market.debug.MarketPredictionDeadlockDebug;
 import jakarta.validation.ConstraintViolationException;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
@@ -15,8 +17,11 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 @Slf4j
+@RequiredArgsConstructor
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    private final MarketPredictionDeadlockDebug deadlockDebug;
 
     @ExceptionHandler(CustomException.class)
     public ResponseEntity<ApiResponse<Void>> handleCustomException(CustomException e) {
@@ -50,6 +55,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiResponse<Void>> handleException(Exception e) {
+        deadlockDebug.recordUnhandledException(e);
         log.error("Unexpected exception occurred", e);
         return response(CommonErrorCode.INTERNAL_ERROR);
     }

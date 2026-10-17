@@ -40,9 +40,9 @@ services:
         required: false
     environment:
       TZ: Asia/Seoul
-      DB_URL: jdbc:mysql://todongsan-mysql:3306/${DB_MEMBERPOINT:-memberpoint}?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
-      DB_USERNAME: ${DB_USERNAME:-root}
-      DB_PASSWORD: ${DB_PASSWORD:-1234}
+      DB_URL: jdbc:mysql://member-point-mysql:3306/${DB_MEMBERPOINT:-memberpoint}?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
+      DB_USERNAME: ${MEMBERPOINT_DB_USERNAME:-memberpoint_user}
+      DB_PASSWORD: ${MEMBERPOINT_DB_PASSWORD:-memberpoint-local-password}
       JWT_SECRET: ${JWT_SECRET:-local-jwt-secret-change-me-32chars}
       CRYPTO_AES_KEY: ${CRYPTO_AES_KEY:-0123456789abcdef0123456789abcdef}
       KAKAO_CLIENT_ID: ${KAKAO_CLIENT_ID:-local-kakao-client-id}
@@ -65,11 +65,11 @@ services:
       TZ: Asia/Seoul
       SERVER_PORT: 8081
       SPRING_PROFILES_ACTIVE: default
-      DB_HOST: todongsan-mysql
+      DB_HOST: battle-mysql
       DB_PORT: 3306
       DB_NAME: ${DB_BATTLE:-battle}
-      DB_USERNAME: ${DB_USERNAME:-root}
-      DB_PASSWORD: ${DB_PASSWORD:-1234}
+      DB_USERNAME: ${BATTLE_DB_USERNAME:-battle_user}
+      DB_PASSWORD: ${BATTLE_DB_PASSWORD:-battle-local-password}
       MEMBER_POINT_SERVICE_URL: http://member-point-service:8080
       INSIGHT_SERVICE_URL: http://insight-reputation-service:8083
       INTERNAL_AUTH_TOKEN: ${INTERNAL_AUTH_TOKEN:-local-internal-token}
@@ -92,11 +92,11 @@ services:
       SERVER_PORT: 8082
       SPRING_PROFILES_ACTIVE: prod
       TZ: Asia/Seoul
-      DB_HOST: todongsan-mysql
+      DB_HOST: market-mysql
       DB_PORT: 3306
       DB_MARKET: ${DB_MARKET:-market}
-      DB_USERNAME: ${DB_USERNAME:-root}
-      DB_PASSWORD: ${DB_PASSWORD:-1234}
+      DB_USERNAME: ${MARKET_DB_USERNAME:-market_user}
+      DB_PASSWORD: ${MARKET_DB_PASSWORD:-market-local-password}
       MEMBER_POINT_CLIENT_MODE: http
       MEMBER_POINT_SERVICE_URL: http://member-point-service:8080
       INSIGHT_CLIENT_MODE: http
@@ -123,9 +123,9 @@ services:
     environment:
       TZ: Asia/Seoul
       SPRING_PROFILES_ACTIVE: docker
-      DB_URL: jdbc:mysql://todongsan-mysql:3306/${DB_INSIGHT:-insight}?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
-      DB_USERNAME: ${DB_USERNAME:-root}
-      DB_PASSWORD: ${DB_PASSWORD:-1234}
+      DB_URL: jdbc:mysql://insight-mysql:3306/${DB_INSIGHT:-insight}?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
+      DB_USERNAME: ${INSIGHT_DB_USERNAME:-insight_user}
+      DB_PASSWORD: ${INSIGHT_DB_PASSWORD:-insight-local-password}
       REB_API_KEY: ${REB_API_KEY:-replace-me}
       REB_API_BASE_URL: ${REB_API_BASE_URL:-replace-me}
       CLAUDE_API_KEY: ${CLAUDE_API_KEY:-replace-me}

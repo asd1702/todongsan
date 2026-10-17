@@ -7,6 +7,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.todongsan.marketservice.global.config.PointTransportProperties;
 import com.todongsan.marketservice.global.exception.CustomException;
 import com.todongsan.marketservice.global.exception.errorcode.MarketErrorCode;
 import com.todongsan.marketservice.market.client.MemberPointClient;
@@ -24,6 +25,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 @ExtendWith(MockitoExtension.class)
 class MarketSettlementServiceTest {
 
+    private static final PointTransportProperties SYNC = new PointTransportProperties(null, null);
+
     @Mock
     private MarketSettlementTransactionService transactionService;
 
@@ -32,7 +35,7 @@ class MarketSettlementServiceTest {
 
     @Test
     void retryFailedSettlementsRetriesEachMarketAndAggregatesCounts() {
-        MarketSettlementService service = spy(new MarketSettlementService(transactionService, memberPointClient));
+        MarketSettlementService service = spy(new MarketSettlementService(transactionService, memberPointClient, SYNC));
         when(transactionService.selectMarketIdsForSettlementRetry(3)).thenReturn(List.of(1L, 2L, 3L));
         doReturn(response(1L, MarketStatus.SETTLED)).when(service).retryMarketSettlement(1L);
         doReturn(response(2L, MarketStatus.SETTLEMENT_IN_PROGRESS)).when(service).retryMarketSettlement(2L);
@@ -56,7 +59,7 @@ class MarketSettlementServiceTest {
 
     @Test
     void retryFailedSettlementsContinuesAfterUnexpectedException() {
-        MarketSettlementService service = spy(new MarketSettlementService(transactionService, memberPointClient));
+        MarketSettlementService service = spy(new MarketSettlementService(transactionService, memberPointClient, SYNC));
         when(transactionService.selectMarketIdsForSettlementRetry(2)).thenReturn(List.of(1L, 2L));
         doThrow(new IllegalStateException("boom")).when(service).retryMarketSettlement(1L);
         doReturn(response(2L, MarketStatus.SETTLED)).when(service).retryMarketSettlement(2L);
